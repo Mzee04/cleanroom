@@ -42,6 +42,8 @@ $ cleanroom agent
 Recommendation: B
 ```
 
+![Clean Room report](docs/report.png)
+
 ## Why Sprites
 
 Clean Room needs three things a plain container makes awkward, and Sprites provide natively:
