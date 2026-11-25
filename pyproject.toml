@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cleanroom"
+version = "0.1.0"
+description = "A personal submission integrity agent for ML competitions, built for Fly.io Sprites."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+dependencies = []
+
+[project.optional-dependencies]
+demo = ["numpy", "scikit-learn"]
+dev = ["pytest", "numpy", "scikit-learn"]
+
+[project.scripts]
+cleanroom = "cleanroom.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["cleanroom*"]
+
+[tool.setuptools.package-data]
+cleanroom = ["_hook/*.py"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

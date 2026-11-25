@@ -1,0 +1,21 @@
+{
+  "rules": "rules.txt",
+  "output": "submission.csv",
+  "id_column": "id",
+  "pred_column": "pred",
+  "holdout": {"pred": "valid_pred.csv", "truth": "data/valid.csv", "truth_column": "target"},
+  "leaderboard_cmd": ["python3", "host/leaderboard.py", "{output}"],
+  "own_files": ["data/valid.csv"],
+  "seeds": [1, 2, 3],
+  "timeout": 600,
+  "worker_setup": [
+    "python3 -c 'import sklearn, numpy' 2>/dev/null || python3 -m pip install -q --break-system-packages numpy scikit-learn || python3 -m pip install -q numpy scikit-learn"
+  ],
+  "candidates": [
+    {"name": "A", "cmd": ["python3", "candidates/a_target_peek.py"], "note": "Logistic regression + 'pseudo-labels'"},
+    {"name": "B", "cmd": ["python3", "candidates/b_spline_logreg.py"], "note": "Spline features + regularised logistic regression"},
+    {"name": "C", "cmd": ["python3", "candidates/c_extra_data.py"], "note": "Gradient boosting + 'extra rows' from the web"},
+    {"name": "D", "cmd": ["python3", "candidates/d_baseline.py"], "note": "Plain logistic regression baseline"},
+    {"name": "E", "cmd": ["python3", "candidates/e_forest_unseeded.py"], "note": "Random forest, seed not fixed"}
+  ]
+}

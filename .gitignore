@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.cleanroom/
+*.egg-info/
+.pytest_cache/
+demo/data/
+demo/submissions/
+demo/*.csv
+.env
+.venv/
