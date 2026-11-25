@@ -139,7 +139,7 @@ def render_html(s: dict) -> str:
 <div class="sub">Personal submission integrity agent · generated {E(s["generated"])}</div></div>
 <div class="sub">{len(s["candidates"])} candidates · backend {E(str(env.get("backend", "local")))}</div></header>
 <section class="hero"><div class="pick">Agent verdict</div><div class="big">{title}</div>
-<p>{E(s["verdict"]).replace(chr(10), "<br>")}</p>{cautions}</section>
+<p>{E(s["verdict"].removeprefix(f"Submit {pick}. ") if pick else s["verdict"]).replace(chr(10), "<br>")}</p>{cautions}</section>
 <h2>Candidates</h2>
 <table><thead><tr><th>Candidate</th><th>Leaderboard</th><th>Holdout ROC AUC</th><th>Forbidden files</th>
 <th>Network</th><th>Reproduction</th><th>Status</th></tr></thead><tbody>{"".join(rows)}</tbody></table>
