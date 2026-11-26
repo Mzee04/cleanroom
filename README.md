@@ -141,9 +141,10 @@ What it does not cover:
 
 - **The Sprite's internal API is hidden.** Every Sprite has a socket at `/.sprite/api.sock` that can
   manage services and checkpoints, and it is world-writable. Each candidate runs in its own mount
-  namespace with a read-only empty tmpfs over `/.sprite`, so the socket is not there; the runner checks
-  the mask took effect (else WARN `mask_failed`). Any traced `connect` to a path under `/.sprite/`
-  fails the run (`sandbox_escape_attempt`).
+  namespace with `/dev/null` bound over that socket, so a connect to it is refused, while the rest of
+  `/.sprite` (where the Sprite keeps its Python) stays readable. The runner checks the mask took effect
+  (else WARN `mask_failed`), and any traced `connect` to a path under `/.sprite/` fails the run
+  (`sandbox_escape_attempt`). A masked directory gets an empty read-only tmpfs instead.
 - **No untraced children.** `clone(CLONE_UNTRACED)` would start a process strace never sees. A small
   seccomp filter (`_runner/seccomp_exec.py`) refuses it, refuses `clone3` (so libc falls back to
   `clone`) and refuses non-native syscall ABIs; if the filter cannot be installed the run does not

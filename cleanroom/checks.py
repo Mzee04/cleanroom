@@ -263,9 +263,9 @@ def check_sandbox(trace: Trace) -> list[Finding]:
     That socket can start services and create or restore checkpoints from inside the Sprite,
     i.e. run code outside the trace. Any attempt, successful or not, is disqualifying.
     """
-    roots = SANDBOX_SOCKET_PREFIXES + tuple(
-        m.rstrip("/") + "/" for m in (trace.meta or {}).get("mask_paths", []) if m)
-    hits = [e for e in trace.unix_connects() if e.path.startswith(roots)]
+    masked = [m.rstrip("/") for m in (trace.meta or {}).get("mask_paths", []) if m]
+    roots = SANDBOX_SOCKET_PREFIXES + tuple(m + "/" for m in masked)
+    hits = [e for e in trace.unix_connects() if e.path.startswith(roots) or e.path in masked]
     if not hits:
         return []
     return [Finding(FAIL, "sandbox_escape_attempt", "Tried to reach the Sprite's management API",

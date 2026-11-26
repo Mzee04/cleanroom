@@ -101,7 +101,8 @@ def test_untraced_process_without_seccomp_is_caught(box):
     assert worst in ("FAIL", "INCONCLUSIVE")
 
 
-def test_masked_socket_is_hidden_and_connect_fails_the_run(box):
+@pytest.mark.parametrize("mask_socket_only", [False, True])
+def test_masked_socket_is_hidden_and_connect_fails_the_run(box, mask_socket_only):
     hidden = box / "fake-sprite"
     hidden.mkdir()
     os.chmod(hidden, 0o755)
@@ -109,6 +110,8 @@ def test_masked_socket_is_hidden_and_connect_fails_the_run(box):
     srv.bind(str(hidden / "api.sock"))
     os.chmod(hidden / "api.sock", 0o666)
     srv.listen(1)
+    (hidden / "runtime.txt").write_text("needed")
+    os.chmod(hidden / "runtime.txt", 0o644)
     code = ("import os, socket\n"
             f"seen = os.listdir({str(hidden)!r})\n"
             "s = socket.socket(socket.AF_UNIX)\n"
@@ -118,11 +121,15 @@ def test_masked_socket_is_hidden_and_connect_fails_the_run(box):
             "    r = type(e).__name__\n"
             "open('out.txt', 'w').write(repr(seen) + ' ' + r)\n")
     try:
-        t = run_root(box, code, mask_paths=[str(hidden)])
+        t = run_root(box, code, mask_paths=[str(hidden / "api.sock") if mask_socket_only else str(hidden)])
     finally:
         srv.close()
     assert t.meta["mask"] == "hidden"
-    assert (box / "trace" / "outputs" / "out.txt").read_text() == "[] FileNotFoundError"
+    out = (box / "trace" / "outputs" / "out.txt").read_text()
+    if mask_socket_only:     # the socket is dead, the rest of the directory still works
+        assert "runtime.txt" in out and out.endswith("ConnectionRefusedError")
+    else:
+        assert out == "[] FileNotFoundError"
     fs, worst = verdict(t, box)
     assert worst == "FAIL" and "sandbox_escape_attempt" in {f.code for f in fs}
 

@@ -45,8 +45,12 @@ NOFILE_LIMIT = 4096
 
 # Runs as (namespace) root before strace: hide each existing path behind an empty read-only tmpfs,
 # write a marker so the runner knows it worked, then exec the rest of the command line.
+# A directory gets an empty read-only tmpfs over it; a file or socket gets /dev/null bound over it,
+# so connect() on it is refused while the rest of its directory (on a Sprite: the language runtimes
+# under /.sprite/languages) stays usable.
 MASK_SH = ('mark=$1; shift; while [ "$1" != "--" ]; do '
-           'if [ -e "$1" ]; then mount -t tmpfs -o ro,mode=0555,size=4k cr-mask "$1" || exit 97; fi; shift; '
+           'if [ -d "$1" ] && [ ! -L "$1" ]; then mount -t tmpfs -o ro,mode=0555,size=4k cr-mask "$1" || exit 97; '
+           'elif [ -e "$1" ]; then mount --bind /dev/null "$1" || exit 97; fi; shift; '
            'done; shift; echo masked > "$mark" && exec "$@"')
 
 # Run as the candidate uid, inside the run's network setup, before the candidate starts.

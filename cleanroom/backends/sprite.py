@@ -472,7 +472,7 @@ class SpriteBackend(Backend):
                  "timeout": int(spec.timeout), "outputs": outs, "hide": list(hide),
                  "user": CANDIDATE_USER, "home": REMOTE_HOME, "strace": True, "strace_args": STRACE_ARGS,
                  "netns": "none", "ptrace_userns": True, "dns_probe": True, "bundle_owner": "sprite",
-                 "egress_probe": True, "mask_paths": ["/.sprite"],
+                 "egress_probe": True, "mask_paths": ["/.sprite/api.sock"],
                  "scan_dirs": [REMOTE_WORK, REMOTE_HOME, "/tmp", "/var/tmp", "/dev/shm"]}
         self._launch_and_wait(rspec, int(spec.timeout))
         bundle = self.api.read_file(self.worker, rspec["bundle"])
