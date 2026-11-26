@@ -7,6 +7,7 @@
   cleanroom report [--serve]            HTML report (serves on 127.0.0.1:8080; --host 0.0.0.0 to publish)
   cleanroom agent [--serve]             the full loop over cleanroom.json candidates
   cleanroom doctor                      what isolation/tracing works on this machine
+  cleanroom verify-chain --repo O/R     check the GitHub ledger's hash chain (exit 1 if broken)
 """
 from __future__ import annotations
 
@@ -121,6 +122,17 @@ def cmd_doctor(args):
     print(json.dumps({"backend": proj.backend.describe(), "capabilities": proj.backend.doctor()}, indent=2))
 
 
+def cmd_verify_chain(args):
+    from .ghledger import fetch_issues, verify_chain
+    gw = args.gateway or os.environ.get("CLEANROOM_GITHUB_GATEWAY") or None
+    repo = args.repo or os.environ.get("CLEANROOM_GITHUB_REPO")
+    if not repo:
+        sys.exit("verify-chain needs --repo OWNER/REPO (or CLEANROOM_GITHUB_REPO)")
+    ok, lines = verify_chain(fetch_issues(repo, gw))
+    print("\n".join(lines))
+    sys.exit(0 if ok else 1)
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="cleanroom", description="Personal submission integrity agent.")
     p.add_argument("--version", action="version", version=__version__)
@@ -165,6 +177,12 @@ def main(argv=None):
 
     s = sub.add_parser("doctor", help="show which isolation/tracing features work here")
     s.set_defaults(fn=cmd_doctor)
+
+    s = sub.add_parser("verify-chain", help="check the GitHub ledger's hash chain")
+    s.add_argument("--repo", help="OWNER/REPO of the ledger (default: CLEANROOM_GITHUB_REPO)")
+    s.add_argument("--gateway", help="connector gateway URL (default: CLEANROOM_GITHUB_GATEWAY, "
+                                     "else the public GitHub API)")
+    s.set_defaults(fn=cmd_verify_chain)
 
     args = p.parse_args(argv)
     args.fn(args)

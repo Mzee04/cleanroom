@@ -87,6 +87,8 @@ def md_text(s) -> str:
 def md_code_block(lines, lang: str = "") -> str:
     """A fenced block whose fence is longer than any backtick run inside it."""
     text = "\n".join(redact_text(str(x)) for x in lines)
+    if lang != "json":   # an HTML comment inside evidence must never pass for a ledger marker
+        text = text.replace("<!--", "<\u200b!--")
     longest = max((len(m) for m in re.findall(r"`+", text)), default=0)
     fence = "`" * max(3, longest + 1)
     return f"{fence}{lang}\n{text}\n{fence}"

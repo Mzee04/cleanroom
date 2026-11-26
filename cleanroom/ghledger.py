@@ -36,8 +36,10 @@ from pathlib import Path
 from .redact import md_code_block, md_inline_code, md_text, redact_cmd, redact_text
 
 GENESIS = "0" * 64
-MARKER_RE = re.compile(r"<!-- cleanroom:session=(\S+) candidate=(\S+) record=([0-9a-f]{64}) "
-                       r"prev=([0-9a-f]{64}) seq=(\d+) -->")
+MARKER_RE = re.compile(r"^<!-- cleanroom:session=(\S+) candidate=(\S+) record=([0-9a-f]{64}) "
+                       r"prev=([0-9a-f]{64}) seq=(\d+) -->[ \t]*$", re.M)
+JSON_BLOCK_RE = re.compile(r"^(`{3,})json\n(.*?)\n\1[ \t]*$", re.M | re.S)
+PUBLIC_API = "https://api.github.com"
 
 
 def _r(x):
@@ -74,9 +76,100 @@ def record_for(c: dict, summary: dict, prev: str) -> dict:
     }
 
 
-def issue_payload(c: dict, summary: dict, prev: str = GENESIS, seq: int = 1) -> dict:
+def _record_section(rjson: str, rsha: str, prev: str, session, candidate, seq: int, supersedes=None) -> str:
+    head = f"Record {seq}" + (f" (revision; supersedes `{supersedes}`)" if supersedes else "")
+    return "\n".join([head, "", md_code_block([rjson], "json"), "",
+                      f"record_sha256: `{rsha}`  ", f"previous_issue_sha256: `{prev}`", "",
+                      f"<!-- cleanroom:session={session} candidate={candidate} record={rsha} prev={prev} "
+                      f"seq={seq} -->"])
+
+
+def parse_records(body: str) -> list[dict]:
+    """Every ledger record in an issue body, each checked against its own JSON block.
+
+    A marker counts only when it is a whole line, the canonical JSON fenced
+    just above it hashes to the marker's ``record`` and that JSON names the
+    same session, candidate and ``previous_issue_sha256``. ``valid`` says
+    whether all of that held; ``problem`` says what did not.
+    """
+    out, last_end = [], 0
+    for m in MARKER_RE.finditer(body or ""):
+        blocks = [b for b in JSON_BLOCK_RE.finditer(body, last_end, m.start())]
+        rec = {"session": m.group(1), "candidate": m.group(2), "record": m.group(3), "prev": m.group(4),
+               "seq": int(m.group(5)), "json": None, "valid": False, "problem": ""}
+        start = last_end
+        if not blocks:
+            rec["problem"] = "no JSON block before the marker"
+        else:
+            b = blocks[-1]
+            start = body.rfind("\n", last_end, b.start()) + 1
+            hdr = body.rfind("Record ", last_end, b.start())
+            if hdr >= 0 and body.count("\n", hdr, b.start()) <= 2:
+                start = hdr
+            rec["json"] = b.group(2)
+            try:
+                data = json.loads(b.group(2))
+            except ValueError:
+                data = None
+            if sha(b.group(2)) != m.group(3):
+                rec["problem"] = "record hash does not match its JSON"
+            elif not isinstance(data, dict) or canonical(data) != b.group(2):
+                rec["problem"] = "JSON is not canonical"
+            elif data.get("previous_issue_sha256") != m.group(4):
+                rec["problem"] = "JSON previous_issue_sha256 differs from the marker"
+            elif data.get("session") != m.group(1) or data.get("candidate") != m.group(2):
+                rec["problem"] = "JSON session/candidate differs from the marker"
+            else:
+                rec["valid"], rec["data"] = True, data
+        rec["section"] = body[start:m.end()]
+        out.append(rec)
+        last_end = m.end()
+    return out
+
+
+def verify_chain(issues: list[dict]) -> tuple[bool, list[str]]:
+    """Check the hash chain across every ledger issue. Returns (ok, report lines)."""
+    recs, lines, ok = [], [], True
+    for i in issues:
+        for r in parse_records(i.get("body") or ""):
+            r["issue"] = i.get("number")
+            if not r["valid"]:
+                ok = False
+                lines.append(f"BROKEN #{r['issue']} seq {r['seq']}: {r['problem']}")
+            recs.append(r)
+    if not recs:
+        return True, ["no ledger records found"]
+    recs.sort(key=lambda r: r["seq"])
+    seqs = [r["seq"] for r in recs]
+    if seqs != list(range(1, len(recs) + 1)):
+        ok = False
+        lines.append(f"BROKEN sequence: expected 1..{len(recs)}, found {seqs}")
+    by_hash = {r["record"]: r for r in recs}
+    for k, r in enumerate(recs):
+        want = GENESIS if k == 0 else recs[k - 1]["record"]
+        if r["prev"] != want:
+            ok = False
+            lines.append(f"BROKEN #{r['issue']} seq {r['seq']}: prev {r['prev'][:12]} should be {want[:12]}")
+        sup = (r.get("data") or {}).get("supersedes")
+        if sup:
+            old = by_hash.get(sup)
+            if not old or old["seq"] >= r["seq"] or (old["session"], old["candidate"]) != (r["session"], r["candidate"]):
+                ok = False
+                lines.append(f"BROKEN #{r['issue']} seq {r['seq']}: supersedes an unknown or later record")
+        lines.append(f"{'ok' if r['valid'] else '!!'} seq {r['seq']:>3} #{r['issue']} {r['session']} "
+                     f"{r['candidate']} {r['record'][:16]}" + (f" (supersedes {sup[:12]})" if sup else ""))
+    lines.append(("chain OK: " if ok else "chain BROKEN: ") + f"{len(recs)} records, head {recs[-1]['record']}")
+    return ok, lines
+
+
+def issue_payload(c: dict, summary: dict, prev: str = GENESIS, seq: int = 1, supersedes: str | None = None,
+                  history: list[str] | tuple = ()) -> dict:
+    """The issue for one candidate. ``history`` carries earlier record sections of the same issue
+    verbatim: a published record is never rewritten, a revision is appended after it."""
     recommended = summary["recommendation"]["recommended"]
     record = record_for(c, summary, prev)
+    if supersedes:
+        record["supersedes"] = supersedes
     rjson = canonical(record)
     rsha = sha(rjson)
     status = c["status"] + (" · RECOMMENDED" if c["name"] == recommended else "")
@@ -101,17 +194,18 @@ def issue_payload(c: dict, summary: dict, prev: str = GENESIS, seq: int = 1) -> 
         ev = [e[:220] for e in f["evidence"][:3]]
         if ev:
             lines += ["", "  " + md_code_block(ev).replace("\n", "\n  "), ""]
-    lines += ["", "### Ledger record",
+    lines += ["", "### Ledger records",
               "Canonical JSON (sorted keys, no spaces). Its SHA-256 is the record hash; "
-              "`previous_issue_sha256` links it to the issue published before it.", "",
-              md_code_block([rjson], "json"), "",
-              f"record_sha256: `{rsha}`  ",
-              f"previous_issue_sha256: `{prev}`", "",
-              f"<!-- cleanroom:session={summary.get('session')} candidate={c['name']} record={rsha} prev={prev} "
-              f"seq={seq} -->"]
+              "`previous_issue_sha256` links it to the record published before it. Earlier records stay "
+              "here unchanged; a re-published result is appended as a revision. "
+              "Check the chain with `cleanroom verify-chain --repo OWNER/REPO`.", ""]
+    for h in history:
+        lines += [h, ""]
+    lines.append(_record_section(rjson, rsha, prev, summary.get("session"), c["name"], seq, supersedes))
     labels = ["cleanroom", c["status"].lower()] + (["recommended"] if c["name"] == recommended else [])
     title = f"[Clean Room] {summary.get('session')} · {c['name']}: {status} · {str(c['sha256'])[:12]}"
-    return {"title": title, "body": "\n".join(lines), "labels": labels, "_record_sha256": rsha, "_seq": seq}
+    return {"title": title, "body": "\n".join(lines), "labels": labels, "_record_sha256": rsha, "_seq": seq,
+            "_record": record}
 
 
 def _issue_number(url: str) -> str:
@@ -175,35 +269,50 @@ def publish(summary: dict, outbox: Path, really: bool = False, ledger=None, gith
         head, seq = h.get("record_sha256", GENESIS), int(h.get("seq", 0))
     if gh:
         try:
-            for i in gh.ledger_issues():
-                m = MARKER_RE.search(i.get("body") or "")
-                if not m:
-                    continue
-                if m.group(1) == session:
-                    existing[m.group(2)] = {"number": i["number"], "prev": m.group(4), "seq": int(m.group(5)),
-                                            "url": i.get("html_url", "")}
-                if int(m.group(5)) > seq:
-                    head, seq = m.group(3), int(m.group(5))
+            issues = gh.ledger_issues()
         except (urllib.error.URLError, OSError, ValueError) as e:
             return [{"name": c["name"], "error": "could not list ledger issues: " + _err(e)}
                     for c in summary["candidates"]]
+        gh_seq = 0
+        for i in issues:
+            for r in parse_records(i.get("body") or ""):
+                if not r["valid"]:       # a forged or damaged marker is never trusted as the chain head
+                    continue
+                if r["session"] == session:
+                    ex = existing.setdefault(r["candidate"], {"number": i["number"], "url": i.get("html_url", ""),
+                                                              "records": []})
+                    if ex["number"] == i["number"]:
+                        ex["records"].append(r)
+                if r["seq"] > gh_seq:
+                    gh_seq, gh_head = r["seq"], r["record"]
+        if gh_seq:      # GitHub is the source of truth for the head once it has records
+            head, seq = gh_head, gh_seq
     done = []
     prev = head
     for c in summary["candidates"]:
         ex = existing.get(c["name"])
-        if ex:
-            payload = issue_payload(c, summary, prev=ex["prev"], seq=ex["seq"])
+        latest = max(ex["records"], key=lambda r: r["seq"]) if ex and ex["records"] else None
+        if latest:
+            same = {k: v for k, v in latest["data"].items() if k not in ("previous_issue_sha256", "supersedes")}
+            fresh = record_for(c, summary, latest["prev"])
+            if same == {k: v for k, v in fresh.items() if k != "previous_issue_sha256"}:
+                done.append({"name": c["name"], "url": ex["url"], "number": str(ex["number"]),
+                             "action": "unchanged", "record_sha256": latest["record"]})
+                continue
+            history = [r["section"] for r in sorted(ex["records"], key=lambda r: r["seq"])]
+            payload = issue_payload(c, summary, prev=prev, seq=seq + 1, supersedes=latest["record"],
+                                    history=history)
         else:
-            seq += 1
-            payload = issue_payload(c, summary, prev=prev, seq=seq)
+            payload = issue_payload(c, summary, prev=prev, seq=seq + 1)
         rsha, pseq = payload.pop("_record_sha256"), payload.pop("_seq")
+        payload.pop("_record")
         path = outbox / f"{session}-{c['name']}.json"
         path.write_text(json.dumps(payload, indent=2))
         if gh:
             try:
                 if ex:
                     r = gh.call("PATCH", f"/issues/{ex['number']}", payload)
-                    action = "updated"
+                    action = "revised"
                 else:
                     r = gh.call("POST", "/issues", payload)
                     action = "created"
@@ -212,12 +321,16 @@ def publish(summary: dict, outbox: Path, really: bool = False, ledger=None, gith
                              "record_sha256": rsha})
             except (urllib.error.URLError, OSError, ValueError) as e:
                 done.append({"name": c["name"], "error": _err(e)})
-                continue
+                continue       # the sequence number is not used up by a failed post
         else:
             done.append({"name": c["name"], "path": str(path), "record_sha256": rsha})
-        prev = rsha
-        if gh and ledger is not None and pseq >= int((ledger.get_meta("chain_head", None, glob=True) or {})
-                                                     .get("seq", 0)):
+        prev, seq = rsha, pseq
+        if gh and ledger is not None:
             ledger.set_meta("chain_head", {"record_sha256": rsha, "seq": pseq, "session": session,
                                            "candidate": c["name"]}, glob=True)
     return done
+
+
+def fetch_issues(repo: str, gateway: str | None = None, opener=None) -> list[dict]:
+    """Ledger issues from the connector gateway, or from the public GitHub API for a public repo."""
+    return GitHub(gateway or PUBLIC_API, repo, opener=opener).ledger_issues()
