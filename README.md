@@ -52,7 +52,7 @@ Clean Room needs three things a plain container makes awkward, and Sprites provi
 | --- | --- |
 | Run untrusted competition code with no internet | **Network policy**, set from *outside* the Sprite through the Sprites API, read-only inside at `/.sprite/policy/network.json`. The code under test cannot loosen it. |
 | Start every candidate from the identical machine, and re-run later to prove reproduction | **Checkpoints** (`POST /v1/sprites/{name}/checkpoint`, restore by id). Copy-on-write, so one per candidate is cheap. |
-| Keep secrets away from the code under test | The worker never receives any credential. The agent drives it over the Sprites API with a token kept in a private 0600 file on the agent Sprite. **Connectors** keep the other credentials off both Sprites: a GitHub connector for the submission ledger, and optionally an OpenRouter/LLM connector for a plain-language verdict. |
+| Keep secrets away from the code under test | The worker never receives any credential. The agent drives it over the Sprites API with a token kept in a private 0600 file on the agent Sprite. The **Sprites GitHub connector** keeps the GitHub credential off both Sprites: the agent posts the verdict ledger through the Sprites gateway, and the connector's policy admits only `cleanroom-agent*` and only the ledger repo's paths. |
 | A report you can open from anywhere | Every Sprite has an HTTPS URL routed to port 8080. |
 
 ### Two Sprites
@@ -179,11 +179,40 @@ curl -X POST https://api.sprites.dev/v1/sprites/cleanroom-worker/policy/network 
 sprite -s cleanroom-agent exec -- bash -c 'cd ~/cleanroom/demo && cleanroom --backend sprite agent'
 ```
 
-Connectors used: **GitHub connector** for the submission ledger (`cleanroom agent --publish` with
-`CLEANROOM_GITHUB_GATEWAY` and `CLEANROOM_GITHUB_REPO`; without `--publish` the issue payloads are
-written to `.cleanroom/outbox/` for review); optionally an **LLM connector** (OpenRouter, or Ollama Cloud
-through a custom API connector) via `CLEANROOM_LLM_BASE_URL` / `CLEANROOM_LLM_MODEL` for the
-plain-language verdict and an extra rules pass.
+### The Sprites connector: GitHub ledger
+
+Clean Room's Sprites connector is **GitHub** (OAuth). Every session, the agent Sprite opens one issue
+per candidate in a private ledger repo: verdict, checkpoint, output SHA-256, reproduction result, the
+rule clauses quoted word for word and the trace lines behind each finding. The report links each
+candidate to its issue, so a decision you made before a deadline stays on record outside the Sprites.
+
+The Sprite never holds a GitHub token. It calls
+`https://api.sprites.dev/v1/gateway/github/<connection_id>/repos/<owner>/<repo>/issues` with no
+`Authorization` header; the gateway identifies the calling Sprite, checks the connector's access policy
+and attaches the stored credential.
+
+Setup:
+
+1. In the Sprites dashboard, add a **GitHub** connector and approve the OAuth screen.
+2. Create a private repo for the ledger (for example `you/cleanroom-ledger`).
+3. Deploy with the ledger turned on:
+
+   ```bash
+   python3 deploy/deploy_sprites.py --publish --github-repo you/cleanroom-ledger
+   ```
+
+   The script finds the GitHub connector through `GET /v1/oauth/connections` and pins its access
+   policy to `{"name_prefix": "cleanroom-agent", "allowed_endpoints": ["/repos/you/cleanroom-ledger",
+   "/repos/you/cleanroom-ledger/*"]}`. Only the agent Sprite can use the connector, and only for that
+   repo. The worker, which runs untrusted code, is not admitted, and its egress is denied anyway. The
+   script then checks from inside the agent Sprite that the ledger repo answers 200 and that a path
+   outside the allow-list (`/user`) is refused. Finally it passes `CLEANROOM_GITHUB_GATEWAY` and
+   `CLEANROOM_GITHUB_REPO` to the agent and runs `cleanroom agent --publish`.
+
+Without `--publish`, the issue payloads are written to `.cleanroom/outbox/` for review and nothing is
+posted. Optionally, an LLM connector (OpenRouter, or Ollama Cloud through a custom API connector) can
+write the plain-language verdict and run an extra rules pass, via `CLEANROOM_LLM_BASE_URL` /
+`CLEANROOM_LLM_MODEL`. The live run below did not use one.
 
 ### Sprite deployment status (live run, 26 Nov 2026)
 
@@ -201,6 +230,11 @@ log is in `docs/sample_sprite_run.txt`. Checked live:
   ran from the same checkpoint.
 - **Network policy survives a restore:** the API still reports `deny *` after a restore, and the DNS
   probe taken during every restored run says `refused`.
+- **GitHub connector:** with `--publish`, all five verdicts were posted through the Sprites GitHub
+  connector as issues #1–#5 in the private ledger repo (labels `cleanroom`, `pass`/`fail`,
+  `recommended` on B), and the live report links each candidate to its issue. From inside the agent
+  Sprite, the gateway answered 200 for the ledger repo and 403 for `/user`, which is outside the
+  allow-list.
 
 Known quirks:
 - `/.sprite/policy/network.json` was not present inside the worker even though the policy was

@@ -27,6 +27,8 @@ proves reproduction in this environment. E doesn't: the random forest was never 
 VO: "So the agent recommends B: a lower leaderboard score than A, but no forbidden access detected,
 no network, reproduced from its checkpoint, and the best score on my own holdout. It even tells me
 B's edge over D is within noise."
+Then click B's "ledger #2" link → the GitHub issue. VO: "Every verdict also lands in my private GitHub
+ledger, posted through a Sprites connector, so the Sprite never holds my GitHub token."
 
 **1:26–1:30 · Close.** Title card: "Clean Room — know your submission is honest before you send it.
 Built on Fly.io Sprites." Tag @flydotio.

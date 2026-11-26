@@ -94,7 +94,9 @@ def render_html(s: dict) -> str:
             + (f'<div class="meta">95% CI {ci[0]:.3f}–{ci[1]:.3f}</div>' if ci else "")
             + (f'<div class="meta">seed sd {seeds["sd"]:.4f}</div>' if seeds else "")
             + f'</td><td>{_access(c, "forbidden")}</td><td>{_access(c, "network")}</td>'
-            f'<td>{_repro(c)}</td><td><span class="pill {c["status"]}">{c["status"]}</span></td></tr>')
+            f'<td>{_repro(c)}</td><td><span class="pill {c["status"]}">{c["status"]}</span>'
+            + (f'<div class="meta"><a href="{E(c["ledger_issue"])}">ledger #{E(c["ledger_issue"].rsplit("/", 1)[-1])}</a></div>'
+               if c.get("ledger_issue") else "") + '</td></tr>')
 
     cards = []
     for c in s["candidates"]:
@@ -115,7 +117,9 @@ def render_html(s: dict) -> str:
             + ('<span class="pill PASS">RECOMMENDED</span>' if c["name"] == pick else "") +
             f'</div><div class="meta">Command <code>{E(" ".join(c["cmd"]))}</code> · checkpoint '
             f'<code>{E(c["checkpoint"] or "")}</code> · output SHA-256 <code>{E((c["sha256"] or "none")[:16])}…</code>'
-            f' · tracer <code>{E(c["tracer"] or "")}</code> · {c["n_events"] or 0} events</div>'
+            f' · tracer <code>{E(c["tracer"] or "")}</code> · {c["n_events"] or 0} events'
+            + (f' · <a href="{E(c["ledger_issue"])}">GitHub ledger issue #{E(c["ledger_issue"].rsplit("/", 1)[-1])}</a>'
+               if c.get("ledger_issue") else "") + '</div>'
             f'{extra}{"".join(fs)}</div>')
 
     pol_rows = "".join(

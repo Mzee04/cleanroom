@@ -114,15 +114,25 @@ def run_agent(proj: Project, honest: bool = True, publish_github: bool = False, 
             summary["verdict"] = v
         except Exception as e:
             log(f"  (LLM verdict skipped: {type(e).__name__}; using the deterministic verdict)")
-    out = write_report(summary, proj.root / ".cleanroom")
     dests = publish(summary, proj.root / ".cleanroom" / "outbox", really=publish_github)
+    posted = {d["name"]: d["url"] for d in dests if d.get("url")}
+    if posted:
+        proj.ledger.set_meta("github_issues", posted)
+        for c in summary["candidates"]:
+            c["ledger_issue"] = posted.get(c["name"])
+    out = write_report(summary, proj.root / ".cleanroom")
     rec = summary["recommendation"]
     log(_c("B", "\nRecommendation: ", color) + _c("PASS", str(rec["recommended"]), color))
     log(summary["verdict"])
     for cau in rec["cautions"]:
         log(_c("WARN", "  ⚠ " + cau, color))
+    if publish_github:
+        log(_c("B", "\nGitHub ledger (via the Sprites GitHub connector):", color))
+        for d in dests:
+            log(f"  {d['name']}: " + (d.get("url") or d.get("error") or f"not posted ({d.get('path')})"))
     log(f"\nReport: {out}  ·  ledger: {proj.ledger.path}  ·  GitHub ledger: "
-        + ("published" if publish_github else f"{len(dests)} issue payloads in .cleanroom/outbox"))
+        + (f"{len(posted)}/{len(dests)} issues posted" if publish_github
+           else f"{len(dests)} issue payloads in .cleanroom/outbox"))
     log(f"Done in {time.time() - t0:.1f}s")
     return summary
 

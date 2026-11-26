@@ -11,6 +11,7 @@ from .store import Ledger
 def build_summary(ledger: Ledger, policy, env: dict | None = None, honest: bool = True) -> dict:
     cands = []
     rec_inputs = []
+    issues = ledger.get_meta("github_issues") or {}
     for name in ledger.candidates():
         run = ledger.latest(name, "run")
         ver = ledger.latest(name, "verify")
@@ -39,7 +40,7 @@ def build_summary(ledger: Ledger, policy, env: dict | None = None, honest: bool 
             "seeds": seeds, "reproduced": reproduced,
             "verify_sha256": ver["sha256"] if ver else None,
             "investigation": inv["data"].get("verdict") if inv else None,
-            "network_investigation": netinv,
+            "network_investigation": netinv, "ledger_issue": issues.get(name),
             "findings": findings, "fails": fails, "warns": warns,
             "status": "FAIL" if fails else ("WARN" if warns else "PASS"),
             "n_events": run["data"].get("n_events"), "trace_sources": run["data"].get("trace_sources"),

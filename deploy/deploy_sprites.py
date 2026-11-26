@@ -18,6 +18,13 @@ or SPRITES_TOKEN. Never printed.
 
   python3 deploy/deploy_sprites.py            # create/update everything + run the demo once
   python3 deploy/deploy_sprites.py --no-run   # deploy only
+  python3 deploy/deploy_sprites.py --publish --github-repo owner/repo
+        # also post one issue per candidate through the Sprites GitHub connector
+
+GitHub ledger: connect GitHub once in the Sprites dashboard (OAuth). This script
+finds that connector, makes sure its access policy only admits Sprites named
+`cleanroom-agent*` and only paths under the ledger repo, and hands the agent the
+gateway URL (no token: the gateway attaches GitHub's credential itself).
 """
 from __future__ import annotations
 
@@ -46,6 +53,32 @@ def bundle() -> bytes:
     return buf.getvalue()
 
 
+def github_connector(api: SpritesAPI, agent: str, repo: str) -> str:
+    """Find the GitHub connector, pin its access policy, return the gateway base URL."""
+    conns = [c for c in json.loads(api.request("GET", "/v1/oauth/connections")[1]).get("connections", [])
+             if c.get("provider") == "github"]
+    if not conns:
+        raise SystemExit("no GitHub connector: connect GitHub in the Sprites dashboard first")
+    conn = conns[0]
+    policy = {"name_prefix": agent, "allowed_endpoints": [f"/repos/{repo}", f"/repos/{repo}/*"]}
+    have = conn.get("access_policy") or {}
+    if have.get("name_prefix") != agent or sorted(have.get("allowed_endpoints") or []) != sorted(
+            policy["allowed_endpoints"]) or have.get("allow_all"):
+        api.request("PUT", f"/v1/oauth/connections/{conn['id']}", body={"access_policy": policy})
+        log("GitHub connector access policy set:", json.dumps(policy))
+    else:
+        log("GitHub connector access policy already:", json.dumps(have))
+    log("GitHub connector account:", conn.get("provider_account_name"), "· scopes:", conn.get("scopes"))
+    return f"https://api.sprites.dev/v1/gateway/github/{conn['id']}"
+
+
+def gateway_status(api: SpritesAPI, sprite: str, url: str) -> str:
+    """HTTP status of a gateway GET made from inside a Sprite (body discarded)."""
+    out, _, _ = api.exec_result(sprite, ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+                                         "--max-time", "20", url], timeout=60)
+    return out.strip() or "no response"
+
+
 def log(*a):
     print("[deploy]", *a, flush=True)
 
@@ -55,6 +88,8 @@ def main():
     ap.add_argument("--worker", default="cleanroom-worker")
     ap.add_argument("--agent", default="cleanroom-agent")
     ap.add_argument("--no-run", action="store_true")
+    ap.add_argument("--publish", action="store_true", help="post the verdicts to the GitHub ledger")
+    ap.add_argument("--github-repo", default="", help="owner/repo of the ledger (private recommended)")
     args = ap.parse_args()
     api = SpritesAPI()
 
@@ -77,6 +112,15 @@ def main():
     out, err, code = api.exec_result(args.agent, ["bash", "-c", f"stat -c '%a %U' {token_path}"])
     log("agent token file:", out.strip(), "(mode, owner)")
     env = {"CLEANROOM_WORKER": args.worker, "PYTHONUNBUFFERED": "1", "SPRITES_TOKEN_FILE": token_path}
+
+    # 2b. the GitHub ledger through the Sprites GitHub connector (the Sprite never holds a GitHub token)
+    if args.github_repo:
+        gw = github_connector(api, args.agent, args.github_repo)
+        env.update({"CLEANROOM_GITHUB_GATEWAY": gw, "CLEANROOM_GITHUB_REPO": args.github_repo})
+        log("gateway check from the agent, ledger repo:",
+            gateway_status(api, args.agent, f"{gw}/repos/{args.github_repo}"), "(expect 200)")
+        log("gateway check from the agent, outside the allow-list (/user):",
+            gateway_status(api, args.agent, f"{gw}/user"), "(expect a refusal)")
 
     # 3. code + demo onto the agent
     api.write_file(args.agent, "/tmp/cleanroom.tgz", bundle())
@@ -105,7 +149,7 @@ def main():
         env_args = " ".join(f"{k}={v!r}" for k, v in env.items())
         logf = f"{REMOTE}/agent-run.log"
         start_cmd = (f"cd {REMOTE}/demo && rm -f {logf} && setsid nohup env {env_args} python3 -m cleanroom "
-                     f"--backend sprite agent > {logf} 2>&1 < /dev/null & echo started")
+                     f"--backend sprite agent{' --publish' if args.publish else ''} > {logf} 2>&1 < /dev/null & echo started")
         log("starting the agent loop on the agent Sprite:", api.exec_result(args.agent, ["bash", "-c", start_cmd])[0].strip())
         t0, seen = time.time(), 0
         while time.time() - t0 < 3600:
