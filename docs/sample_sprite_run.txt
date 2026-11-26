@@ -10,31 +10,31 @@ Clean Room agent · backend=sprite
   • forbid_file            host/valid_labels.csv    (rule cleanroom.json)
 
 [2/7] Preparing the worker (egress denied, tracer on)
-  session: cr-20261126-025756-c53f
+  session: cr-20261126-065726-c1fc
   network: Sprite network policy (set via Sprites API from outside): denied (probed inside worker: DNS refused, HTTPS blocked, raw IP blocked)
   tracing: {'strace_installed': True, 'strace_works': True, 'separate_uid': True, 'policy_file': False, 'python': '3.13.17', 'sprite_env': True, 'audit_hook': True}
 
-[3/7] Checkpointed the starting state: v81
+[3/7] Checkpointed the starting state: v106
 
 [4/7] Running candidates from the checkpoint
   A: exit 0, sha256 bab13241deae…, FAIL
     tracer strace+audit · candidate uid separate · leaderboard 0.9200 · holdout AUC 0.7721
     FAIL Read forbidden file data/test_labels.csv
       rule 1.2: “The file test_labels.csv is provided for organiser scoring only and must not be read by participant code.”
-      ↳ strace.27:1417  openat(AT_FDCWD</srv/cr/work>, "data/test_labels.csv", O_RDONLY|O_CLOEXEC) = 4</srv/cr/work/data/test_labels.csv>
-      ↳ audit.jsonl:1027  {"ev": "open", "pid": 27, "path": "data/test_labels.csv", "mode": "r", "flags": 524288, "cwd": "/srv/cr/work", "real": "/srv/cr/work/data/test_labels.csv"}
+      ↳ strace.40:1525  openat(AT_FDCWD</srv/cr/work>, "data/test_labels.csv", O_RDONLY|O_CLOEXEC) = 4</srv/cr/work/data/test_labels.csv>
+      ↳ audit.jsonl:1040  {"ev": "open", "pid": 40, "path": "data/test_labels.csv", "mode": "r", "flags": 524288, "cwd": "/srv/cr/work", "real": "/srv/cr/work/data/test_labels.csv"}
   B: exit 0, sha256 212e37d39ed6…, PASS
     tracer strace+audit · candidate uid separate · leaderboard 0.8356 · holdout AUC 0.7855
   C: exit 0, sha256 5af4341aeb2c…, FAIL
     tracer strace+audit · candidate uid separate · leaderboard 0.8059 · holdout AUC 0.7664
     FAIL Tried to reach raw.githubusercontent.com
       rule 2.1: “Submissions are evaluated offline: internet access is disabled during evaluation and code must not make network calls.”
-      ↳ strace.27:1463  sendmmsg(4<socket:[193916]>, [{msg_hdr={msg_name=NULL, msg_namelen=0, msg_iov=[{iov_base="<DNS query for raw.githubusercontent.com>", iov_len=43}], msg_iovlen=1, msg_controllen=0, msg_
-      ↳ strace.27:1465  sendmmsg(5<socket:[197644]>, [{msg_hdr={msg_name=NULL, msg_namelen=0, msg_iov=[{iov_base="<DNS query for raw.githubusercontent.com>", iov_len=43}], msg_iovlen=1, msg_controllen=0, msg_
+      ↳ strace.40:1571  sendmmsg(4<socket:[253407]>, [{msg_hdr={msg_name=NULL, msg_namelen=0, msg_iov=[{iov_base="<DNS query for raw.githubusercontent.com>", iov_len=43}], msg_iovlen=1, msg_controllen=0, msg_
+      ↳ strace.40:1573  sendmmsg(5<socket:[255099]>, [{msg_hdr={msg_name=NULL, msg_namelen=0, msg_iov=[{iov_base="<DNS query for raw.githubusercontent.com>", iov_len=43}], msg_iovlen=1, msg_controllen=0, msg_
   D: exit 0, sha256 937236dbd824…, PASS
     tracer strace+audit · candidate uid separate · leaderboard 0.8252 · holdout AUC 0.7721
-  E: exit 0, sha256 e4c344db45bc…, PASS
-    tracer strace+audit · candidate uid separate · leaderboard 0.7985 · holdout AUC 0.7721
+  E: exit 0, sha256 8b5a64c0761a…, PASS
+    tracer strace+audit · candidate uid separate · leaderboard 0.7807 · holdout AUC 0.7571
 
 [5/7] Investigating red flags
   A: One-factor re-run: the unchanged re-run reproduced the output, and without data/test_labels.csv the output changes and the leaderboard score moves from 0.9200 to 0.8252: the score depends on the forbidden file.
@@ -45,28 +45,49 @@ Clean Room agent · backend=sprite
   B: MATCH · SHA-256 212e37d39ed6e5f4… matched on re-run: reproduced in the recorded environment (same checkpoint, libraries and hardware). Other environments may differ.
   C: skipped (already ineligible)
   D: MATCH · SHA-256 937236dbd8249680… matched on re-run: reproduced in the recorded environment (same checkpoint, libraries and hardware). Other environments may differ.
-  E: MISMATCH · Original SHA-256 e4c344db45bc1c59…, re-run b11f2d289234ef9c…. Fix random seeds and remove other non-determinism before submitting.
+  E: MISMATCH · Original SHA-256 8b5a64c0761ae688…, re-run 0458811df95754bd…. Fix random seeds and remove other non-determinism before submitting.
 
 [7/7] Honest score: seed spread on your holdout
   B: seeds [1, 2, 3] → AUC 0.7855, 0.7855, 0.7855 (sample sd 0.0000, outputs identical)
   D: seeds [1, 2, 3] → AUC 0.7721, 0.7721, 0.7721 (sample sd 0.0000, outputs identical)
 
 Recommendation: B
-Submit B. No forbidden access detected in its trace, no network attempts, and its output reproduced from checkpoint v81 (SHA-256 match: reproduced in the recorded environment). Its holdout ROC AUC is 0.7855 (95% CI 0.689–0.874, optimistic because it is the top pick).
+Submit B. No forbidden access detected in its trace, no network attempts, and its output reproduced from checkpoint v106 (SHA-256 match: reproduced in the recorded environment). Its holdout ROC AUC is 0.7855 (95% CI 0.687–0.874, optimistic because it is the top pick).
 A is not recommended despite a leaderboard score of 0.9200: Read forbidden file data/test_labels.csv.
 C is not recommended despite a leaderboard score of 0.8059: Tried to reach raw.githubusercontent.com.
-E is not recommended despite a leaderboard score of 0.7985: Output did not reproduce from checkpoint v81.
+E is not recommended despite a leaderboard score of 0.7807: Output did not reproduce from checkpoint v106.
 B vs D on your holdout: +0.0134 AUC, but the 95% interval (-0.0156 to +0.0458) includes zero, so the edge is within noise and D would be an equally defensible pick.
   ⚠ A has the top leaderboard score but is not eligible: Read forbidden file data/test_labels.csv
   ⚠ B's output was byte-identical for every seed, so either it is fully deterministic or it ignores CLEANROOM_SEED; the seed spread says nothing about seed sensitivity in that case.
   ⚠ B was picked as the best holdout score, so its interval is optimistic (selection after the maximum); use the paired comparison below.
 
-GitHub ledger (via the Sprites GitHub connector):
-  A: https://github.com/Mzee04/cleanroom-ledger/issues/6 (created)
-  B: https://github.com/Mzee04/cleanroom-ledger/issues/7 (created)
-  C: https://github.com/Mzee04/cleanroom-ledger/issues/8 (created)
-  D: https://github.com/Mzee04/cleanroom-ledger/issues/9 (created)
-  E: https://github.com/Mzee04/cleanroom-ledger/issues/10 (created)
+Report: /home/sprite/cleanroom/demo/.cleanroom/report.html  ·  ledger: /home/sprite/cleanroom/demo/.cleanroom/ledger.sqlite  ·  GitHub ledger: 5 issue payloads in .cleanroom/outbox
+Done in 338.7s
 
-Report: /home/sprite/cleanroom/demo/.cleanroom/report.html  ·  ledger: /home/sprite/cleanroom/demo/.cleanroom/ledger.sqlite  ·  GitHub ledger: 5/5 issues posted
-Done in 326.8s
+--- after the run (the loop above ran without --publish; the same session was then published) ---
+
+Per-run sandbox record (meta.json, identical for A-E):
+  mask: hidden (/.sprite/api.sock)   seccomp: on   untraced_procs: []   audit_truncated: false
+  limits: --fsize=4294967296 --nofile=4096 --nproc=1024
+  egress probe as cr-cand before the run: dns refused; tcp 1.1.1.1:443, 8.8.8.8:53, 9.9.9.9:443 blocked;
+  udp 8.8.8.8:53 blocked
+
+GitHub ledger (via the Sprites GitHub connector), session cr-20261126-065726-c1fc:
+  A: https://github.com/Mzee04/cleanroom-ledger/issues/11 (created)
+  B: https://github.com/Mzee04/cleanroom-ledger/issues/12 (created)
+  C: https://github.com/Mzee04/cleanroom-ledger/issues/13 (created)
+  D: https://github.com/Mzee04/cleanroom-ledger/issues/14 (created)
+  E: https://github.com/Mzee04/cleanroom-ledger/issues/15 (created)
+
+$ cleanroom verify-chain --repo Mzee04/cleanroom-ledger
+ok seq   1 #6 cr-20261126-025756-c53f A 6639ad13b7b18c63
+ok seq   2 #7 cr-20261126-025756-c53f B 11fca2966567aecb
+ok seq   3 #8 cr-20261126-025756-c53f C 98f52143749f2cd4
+ok seq   4 #9 cr-20261126-025756-c53f D f69efb11c707792e
+ok seq   5 #10 cr-20261126-025756-c53f E 035d65c6080206f5
+ok seq   6 #11 cr-20261126-065726-c1fc A ecdc9a15f81c02d6
+ok seq   7 #12 cr-20261126-065726-c1fc B dc0cff4050ff1533
+ok seq   8 #13 cr-20261126-065726-c1fc C cf59f29d213765d3
+ok seq   9 #14 cr-20261126-065726-c1fc D 84d2f0f4d332913d
+ok seq  10 #15 cr-20261126-065726-c1fc E 2465dbbde2c1b2df
+chain OK: 10 records, head 2465dbbde2c1b2df0f83ddae6e5fd1992dd999f13668bcde371a515700197407

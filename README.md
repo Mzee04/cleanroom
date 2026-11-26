@@ -348,8 +348,14 @@ write the plain-language verdict and run an extra rules pass, via `CLEANROOM_LLM
 ### Sprite deployment status (live run, 26 Nov 2026)
 
 The full 7-step loop has run on real Sprites (`cleanroom-agent` driving `cleanroom-worker`); the
-log is in `docs/sample_sprite_run.txt`. Checked live:
+latest log (session `cr-20261126-065726-c1fc`, with the sandbox hardening above) is in
+`docs/sample_sprite_run.txt`. Checked live:
 
+- **Sandbox hardening:** for every candidate run the worker recorded `mask: hidden` for
+  `/.sprite/api.sock`, `seccomp: on`, no untraced processes, the rlimits, and an egress probe as
+  `cr-cand` with DNS refused and every TCP/UDP destination blocked. A first attempt that masked all of
+  `/.sprite` failed closed on every candidate (the Sprite's Python lives under `/.sprite/languages`),
+  which is why only the socket is masked now.
 - **Egress denied:** with the `deny *` policy, inside the worker DNS is refused, HTTPS to
   example.com fails and a raw-IP connect to 1.1.1.1:443 fails. Candidate C's DNS queries for
   `raw.githubusercontent.com` show up in strace and go unanswered.
@@ -364,16 +370,19 @@ log is in `docs/sample_sprite_run.txt`. Checked live:
 - **Checkpoint / restore:** restoring wipes files written after the checkpoint, and every candidate
   ran from the same checkpoint.
 - **Network policy survives a restore:** the API still reports `deny *` after a restore, and the DNS
-  probe taken during every restored run says `refused`.
+  probe taken after every restored run says `refused`.
 - **Holdout truth stays on the agent:** `host/valid_labels.csv` is never uploaded to the worker, and
   the policy forbids reading it.
-- **GitHub connector:** with `--publish`, all five verdicts of session `cr-20261126-025756-c53f` were
-  posted through the Sprites GitHub connector as issues #6–#10 in the public ledger repo
-  `Mzee04/cleanroom-ledger`, hash-chained (genesis → A → B → C → D → E). Issues #1–#5, from an earlier
-  version without sessions or records, are closed with links to their replacements. From inside the
+- **GitHub connector:** the verdicts of session `cr-20261126-025756-c53f` were posted through the
+  Sprites GitHub connector as issues #6–#10 in the public ledger repo `Mzee04/cleanroom-ledger`
+  (records 1–5), and those of session `cr-20261126-065726-c1fc` as issues #11–#15 (records 6–10),
+  chained on from #10. `cleanroom verify-chain --repo Mzee04/cleanroom-ledger` reports
+  `chain OK: 10 records`. Issues #1–#5, from an earlier version without sessions or records, are
+  closed with links to their replacements and carry no records. From inside the
   agent Sprite, the gateway answered 200 for the ledger repo and 403 for `/user`, which is outside the
   allow-list.
-- **Result:** B recommended (holdout ROC AUC 0.7855, reproduced from checkpoint v81); A fails (reads
+- **Result:** B recommended (holdout ROC AUC 0.7855, 95% CI 0.687–0.874, reproduced from checkpoint
+  v106); A fails (reads
   `test_labels.csv`, and its leaderboard score drops from 0.9200 to 0.8252 without it); C fails (DNS
   for `raw.githubusercontent.com`, output produced with egress denial verified); E fails reproduction.
 
