@@ -21,7 +21,7 @@ def write_preds(path, ids, p):
     with open(path, "w", newline="") as fh:
         w = csv.writer(fh)
         w.writerow(["id", "pred"])
-        for i, v in zip(ids, p):
+        for i, v in zip(ids, p, strict=True):
             w.writerow([i, f"{v:.6f}"])
 
 

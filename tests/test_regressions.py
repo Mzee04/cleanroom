@@ -1,11 +1,9 @@
 """One regression test (or more) per finding from the external reviews."""
 import json
 import math
-import os
 import shutil
 import subprocess
 import sys
-import tarfile
 from pathlib import Path
 
 import pytest

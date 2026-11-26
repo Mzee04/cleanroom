@@ -27,7 +27,7 @@ def roc_auc(y: list[int], s: list[float]) -> float | None:
     n_neg = len(y) - n_pos
     if not y or n_pos == 0 or n_neg == 0:
         return None
-    pairs = sorted(zip(s, y))
+    pairs = sorted(zip(s, y, strict=True))
     rank_sum, i = 0.0, 0
     while i < len(pairs):
         j = i
@@ -112,8 +112,9 @@ def score_file(pred_path: Path, truth_path: Path, id_col="id", pred_col="pred", 
 
 def _quantiles(vals, alpha):
     vals = sorted(vals)
-    lo = vals[int(alpha / 2 * len(vals))]
-    hi = vals[min(len(vals) - 1, int((1 - alpha / 2) * len(vals)))]
+    n = len(vals) - 1        # symmetric order statistics: floor(a/2 * (N-1)) and ceil((1-a/2) * (N-1))
+    lo = vals[max(0, math.floor(alpha / 2 * n))]
+    hi = vals[min(n, math.ceil((1 - alpha / 2) * n))]
     return lo, hi
 
 
@@ -138,8 +139,8 @@ def paired_bootstrap_diff(ids_a, y_a, s_a, ids_b, y_b, s_b, n_boot=1000, seed=0,
     """AUC(a) - AUC(b), resampling the same observations (aligned by id). None if not comparable."""
     if not ids_a or set(ids_a) != set(ids_b) or len(ids_a) != len(ids_b):
         return None
-    ya, sa = dict(zip(ids_a, y_a)), dict(zip(ids_a, s_a))
-    yb, sb = dict(zip(ids_b, y_b)), dict(zip(ids_b, s_b))
+    ya, sa = dict(zip(ids_a, y_a, strict=True)), dict(zip(ids_a, s_a, strict=True))
+    yb, sb = dict(zip(ids_b, y_b, strict=True)), dict(zip(ids_b, s_b, strict=True))
     ids = sorted(ya)
     if any(ya[i] != yb[i] for i in ids):
         return None

@@ -287,7 +287,7 @@ def parse_strace_file(path: Path, display_name: str | None = None, state: dict |
     st.setdefault("cwd", None)          # last absolute cwd seen (chdir / AT_FDCWD decoration); None = start cwd
     st.setdefault("cwd_changed", False)
     st.setdefault("exited", False)
-    with open(path, "r", errors="replace") as fh:
+    with open(path, errors="replace") as fh:
         for lineno, line in enumerate(fh, 1):
             if EXIT_RE.match(line):
                 st["exited"] = True
@@ -459,7 +459,7 @@ def parse_strace_line(line: str, pid: int | None = None, state: dict | None = No
 def parse_audit_file(path: Path, display_name: str | None = None, errors: list | None = None) -> list[Event]:
     events: list[Event] = []
     name = display_name or path.name
-    with open(path, "r", errors="replace") as fh:
+    with open(path, errors="replace") as fh:
         for lineno, raw in enumerate(fh, 1):
             if not raw.strip():
                 continue

@@ -79,7 +79,7 @@ def main(argv: list[str]) -> None:
         install()
     except OSError as e:
         sys.stderr.write(f"[cleanroom] seccomp filter not installed ({e}); refusing to run untraceable code\n")
-        raise SystemExit(96)
+        raise SystemExit(96) from None
     os.execvp(argv[1], argv[1:])
 
 

@@ -1,4 +1,6 @@
-from .base import Backend, RunResult, RunSpec  # noqa: F401
+from .base import Backend, RunResult, RunSpec
+
+__all__ = ["Backend", "RunResult", "RunSpec", "get_backend"]
 
 
 def get_backend(name: str, project, **kw) -> "Backend":

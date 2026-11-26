@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 from collections import OrderedDict
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 
 from .policy import Policy, Rule
@@ -42,7 +43,7 @@ class Finding:
 
 
 def _group(events, key):
-    g: "OrderedDict[str, list]" = OrderedDict()
+    g: OrderedDict[str, list] = OrderedDict()
     for e in events:
         g.setdefault(key(e), []).append(e)
     return g
@@ -80,7 +81,7 @@ def _origin(path: str, aliases: dict[str, str]) -> list[str]:
 
 
 def check_files(trace: Trace, policy: Policy, workdir: str, outputs: list[str],
-                own_files: list[str] = ()) -> list[Finding]:
+                own_files: Sequence[str] = ()) -> list[Finding]:
     out: list[Finding] = []
     reads = [e for e in trace.events if e.kind == "open" and e.mode in ("read", "rw")]
     forbidden_hit = False
@@ -369,7 +370,7 @@ def check_trace(trace: Trace, tracer: str | None = None) -> list[Finding]:
 
 def analyse(trace: Trace, policy: Policy, workdir: str, exit_code: int, output_sha: str | None,
             output: str, outputs: list[str] | None = None, enforced: bool = True,
-            own_files: list[str] = (), tracer: str | None = None) -> list[Finding]:
+            own_files: Sequence[str] = (), tracer: str | None = None) -> list[Finding]:
     """Findings for one run. Fails closed: with an unusable trace no PASS finding is kept."""
     f = check_run(exit_code, output_sha, output)
     gate = check_trace(trace, tracer)
