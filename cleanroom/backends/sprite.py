@@ -16,11 +16,12 @@ Restoring wipes the worker's whole disk, which is why the ledger, traces and
 reports live with the agent (another Sprite, or your laptop), never on the
 worker.
 
-Auth: either ``SPRITES_TOKEN`` (Bearer) against https://api.sprites.dev, or a
-Sprites *Custom API connector* that wraps the Sprites API itself
-(``CLEANROOM_SPRITES_API=https://api.sprites.dev/v1/gateway/<provider>/<conn_id>``).
-Through the connector the agent Sprite never holds the token: the gateway
-attaches it. The token is never printed or written to disk by this module.
+Auth: a Sprites API token, read from the file named by ``SPRITES_TOKEN_FILE``
+(preferred; on the agent Sprite this is a 0600 file written through the fs
+API, never on a command line) or from ``SPRITES_TOKEN``. The Sprites connector
+gateway refuses to wrap the Sprites API itself ("blocked: base URL targets the
+Sprites API itself"), so a connector cannot hold this particular token. The
+worker Sprite never receives it, and this module never prints or logs it.
 """
 from __future__ import annotations
 
@@ -50,16 +51,51 @@ class SpritesAPIError(RuntimeError):
     pass
 
 
+def parse_exec_stream(raw: bytes) -> tuple[bytes, bytes, int | None]:
+    """Decode the non-TTY HTTP exec reply (observed live, Sprites API v0.1.12).
+
+    The body is a byte stream of frames: 0x01 + stdout bytes, 0x02 + stderr
+    bytes, and finally 0x03 + one byte holding the exit code. A frame runs
+    until the next frame marker.
+    """
+    out, err, code = bytearray(), bytearray(), None
+    cur = None
+    i = 0
+    while i < len(raw):
+        b = raw[i]
+        if b == 3 and i + 1 < len(raw) and i + 2 >= len(raw):
+            code = raw[i + 1]
+            break
+        if b in (1, 2):
+            cur = out if b == 1 else err
+        elif cur is not None:
+            cur.append(b)
+        else:
+            out.append(b)  # tolerate an unframed body
+        i += 1
+    return bytes(out), bytes(err), code
+
+
 class SpritesAPI:
     """Minimal Sprites REST client (stdlib only)."""
 
     def __init__(self, base_url: str | None = None, token: str | None = None, timeout: int = 600):
         self.base = (base_url or os.environ.get("CLEANROOM_SPRITES_API") or DEFAULT_API).rstrip("/")
-        self._token = token if token is not None else os.environ.get("SPRITES_TOKEN")
+        self._token_file = None if token is not None else os.environ.get("SPRITES_TOKEN_FILE")
+        self._token = token if token is not None else self._read_token()
         self.via_gateway = "/v1/gateway/" in self.base
         self.timeout = timeout
         if not self.via_gateway and not self._token:
-            raise SpritesAPIError("Set SPRITES_TOKEN, or CLEANROOM_SPRITES_API to a Sprites connector gateway URL")
+            raise SpritesAPIError("Set SPRITES_TOKEN_FILE (path to a 0600 file holding a Sprites API token) "
+                                  "or SPRITES_TOKEN")
+
+    def _read_token(self) -> str | None:
+        if self._token_file:
+            try:
+                return Path(self._token_file).expanduser().read_text().strip() or None
+            except OSError:
+                raise SpritesAPIError("SPRITES_TOKEN_FILE is set but cannot be read") from None
+        return (os.environ.get("SPRITES_TOKEN") or "").strip() or None
 
     def __repr__(self):  # never leak the token in tracebacks or logs
         return f"SpritesAPI(base={self.base!r}, gateway={self.via_gateway})"
@@ -78,12 +114,20 @@ class SpritesAPI:
             data, headers["Content-Type"] = body, ctype or "application/octet-stream"
         if self._token and not self.via_gateway:
             headers["Authorization"] = "Bearer " + self._token
-        req = urllib.request.Request(url, data=data, method=method, headers=headers)
-        try:
-            resp = urllib.request.urlopen(req, timeout=timeout or self.timeout)
-        except urllib.error.HTTPError as e:
-            detail = e.read()[:400].decode("utf-8", "replace")
-            raise SpritesAPIError(f"{method} {path} -> HTTP {e.code}: {detail}") from None
+        for attempt in (0, 1):
+            req = urllib.request.Request(url, data=data, method=method, headers=headers)
+            try:
+                resp = urllib.request.urlopen(req, timeout=timeout or self.timeout)
+                break
+            except urllib.error.HTTPError as e:
+                detail = e.read()[:400].decode("utf-8", "replace")
+                if e.code == 401 and attempt == 0 and self._token_file:
+                    fresh = self._read_token()  # token file may have been rotated
+                    if fresh and fresh != self._token:
+                        self._token = fresh
+                        headers["Authorization"] = "Bearer " + fresh
+                        continue
+                raise SpritesAPIError(f"{method} {path} -> HTTP {e.code}: {detail}") from None
         if stream:
             return resp
         with resp:
@@ -121,6 +165,11 @@ class SpritesAPI:
         return self.request("GET", f"/v1/sprites/{name}/fs/read", query=q)[1]
 
     # exec -----------------------------------------------------------------
+    def exec_result(self, name, argv: list[str], **kw) -> tuple[str, str, int | None]:
+        """Run a command; returns (stdout, stderr, exit_code)."""
+        o, e, c = parse_exec_stream(self.exec(name, argv, **kw))
+        return o.decode("utf-8", "replace"), e.decode("utf-8", "replace"), c
+
     def exec(self, name, argv: list[str], *, workdir: str | None = None,
              env: dict | None = None, timeout: int | None = None) -> bytes:
         q = [("cmd", a) for a in argv]
@@ -210,8 +259,12 @@ class SpriteBackend(Backend):
 
     # -- helpers -----------------------------------------------------------
     def _sh(self, script: str, timeout: int = 900) -> str:
-        out = self.api.exec(self.worker, ["bash", "-c", script], timeout=timeout)
-        return out.decode("utf-8", "replace")
+        """Run a bash script on the worker; returns stdout followed by stderr."""
+        if hasattr(self.api, "exec_result"):
+            out, err, code = self.api.exec_result(self.worker, ["bash", "-c", script], timeout=timeout)
+            self.last_exit = code
+            return out + err
+        return self.api.exec(self.worker, ["bash", "-c", script], timeout=timeout).decode("utf-8", "replace")
 
     def _wait_ready(self, limit: float = 180):
         t0 = time.time()
@@ -228,9 +281,12 @@ class SpriteBackend(Backend):
     def _apply_policy(self, policy: dict) -> dict:
         self.api.set_network_policy(self.worker, policy)
         got = self.api.get_network_policy(self.worker)
-        inside = self._sh("cat /.sprite/policy/network.json 2>/dev/null; echo; "
-                          "(getent hosts example.com >/dev/null 2>&1 && echo DNS:resolves) || echo DNS:refused",
-                          timeout=60)
+        inside = self._sh(
+            "cat /.sprite/policy/network.json 2>/dev/null; echo; "
+            "(getent hosts example.com >/dev/null 2>&1 && echo DNS:resolves) || echo DNS:refused; "
+            "(curl -sS -m 6 -o /dev/null https://example.com 2>/dev/null && echo HTTPS:open) || echo HTTPS:blocked; "
+            "python3 -c \"import socket;s=socket.socket();s.settimeout(5);s.connect(('1.1.1.1',443));print('RAWIP:open')\" "
+            "2>/dev/null || echo RAWIP:blocked", timeout=90)
         self._policy_evidence = {"set": policy, "api_reports": got, "inside_probe": inside.strip()[-600:]}
         return self._policy_evidence
 
@@ -278,8 +334,13 @@ class SpriteBackend(Backend):
 
     def _network_desc(self) -> str:
         probe = self._policy_evidence.get("inside_probe", "")
-        verdict = "DNS refused inside worker" if "DNS:refused" in probe else (
-            "WARNING: DNS still resolves inside worker" if "DNS:resolves" in probe else "unverified")
+        if "DNS:refused" in probe and "HTTPS:blocked" in probe and "RAWIP:blocked" in probe:
+            verdict = "denied (probed inside worker: DNS refused, HTTPS blocked, raw IP blocked)"
+        elif "DNS:resolves" in probe or ":open" in probe:
+            verdict = "WARNING: egress still open inside worker (" + " ".join(
+                w for w in probe.split() if ":" in w and w.split(":")[0] in ("DNS", "HTTPS", "RAWIP")) + ")"
+        else:
+            verdict = "unverified"
         return f"Sprite network policy (set via Sprites API from outside): {verdict}"
 
     def checkpoint(self, label: str) -> str:

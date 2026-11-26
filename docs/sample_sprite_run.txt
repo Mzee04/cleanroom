@@ -1,0 +1,64 @@
+[deploy] starting the agent loop on the agent Sprite: started
+Clean Room agent · backend=sprite
+
+[1/7] Rules → policy: 6 rules from rules.txt
+  • allow_file             train.csv                (rule 1.1)
+  • allow_file             test.csv                 (rule 1.1)
+  • forbid_file            test_labels.csv          (rule 1.2)
+  • forbid_external_data                            (rule 1.3 (sentence 1))
+  • deny_network                                    (rule 2.1)
+  • require_reproducible                            (rule 3.1)
+
+[2/7] Preparing the worker (egress denied, tracer on)
+  network: Sprite network policy (set via Sprites API from outside): denied (probed inside worker: DNS refused, HTTPS blocked, raw IP blocked)
+  tracing: {'strace_installed': True, 'strace_works': True, 'policy_file': False, 'python': '3.13.17', 'sprite_env': True, 'audit_hook': True}
+
+[3/7] Checkpointed the starting state: v18
+
+[4/7] Running candidates from the checkpoint
+  A: exit 0, sha256 bab13241deae…, FAIL
+    leaderboard 0.9200 · holdout AUC 0.7721
+    FAIL Read forbidden file data/test_labels.csv
+      rule 1.2: “The file test_labels.csv is provided for organiser scoring only and must not be read by participant code.”
+      ↳ strace.17:1597  openat(AT_FDCWD, "data/test_labels.csv", O_RDONLY|O_CLOEXEC) = 4
+      ↳ audit.jsonl:1028  {"ev": "open", "pid": 17, "path": "data/test_labels.csv", "mode": "r", "flags": 524288, "cwd": "/home/sprite/work"}
+  B: exit 0, sha256 212e37d39ed6…, PASS
+    leaderboard 0.8356 · holdout AUC 0.7855
+  C: exit 0, sha256 5af4341aeb2c…, FAIL
+    leaderboard 0.8059 · holdout AUC 0.7664
+    FAIL Tried to reach raw.githubusercontent.com
+      rule 2.1: “Submissions are evaluated offline: internet access is disabled during evaluation and code must not make network calls.”
+      ↳ strace.17:1645  sendmmsg(4, [{msg_hdr={msg_name=NULL, msg_namelen=0, msg_iov=[{iov_base="<DNS query for raw.githubusercontent.com>", iov_len=43}], msg_iovlen=1, msg_controllen=0, msg_flags=0}, msg_len
+      ↳ strace.17:1647  sendmmsg(5, [{msg_hdr={msg_name=NULL, msg_namelen=0, msg_iov=[{iov_base="<DNS query for raw.githubusercontent.com>", iov_len=43}], msg_iovlen=1, msg_controllen=0, msg_flags=0}, msg_len
+  D: exit 0, sha256 937236dbd824…, PASS
+    leaderboard 0.8252 · holdout AUC 0.7721
+  E: exit 0, sha256 421f4b68d343…, PASS
+    leaderboard 0.7926 · holdout AUC 0.7643
+
+[5/7] Investigating red flags
+  A: Without data/test_labels.csv the output changes and the leaderboard score moves from 0.9200 to 0.8252: the score depends on the forbidden file.
+  C: The run still produced its output with egress denied, so the model does not need the download to work. Remove the network call before submitting; as written it breaks the rules.
+
+[6/7] Verifying reproduction from the checkpoint
+  A: skipped (already ineligible)
+  B: MATCH · SHA-256 212e37d39ed6e5f4… matched on re-run. This proves reproduction in this environment only.
+  C: skipped (already ineligible)
+  D: MATCH · SHA-256 937236dbd8249680… matched on re-run. This proves reproduction in this environment only.
+  E: MISMATCH · Original SHA-256 421f4b68d343f85b…, re-run 4ef659e72160cd03…. Fix random seeds and remove other non-determinism before submitting.
+
+[7/7] Honest score: seed spread on your holdout
+  B: seeds [1, 2, 3] → AUC 0.7855, 0.7855, 0.7855 (sd 0.0000)
+  D: seeds [1, 2, 3] → AUC 0.7721, 0.7721, 0.7721 (sd 0.0000)
+
+Recommendation: B
+Submit B. No forbidden access detected in its trace, no network attempts, and its output reproduced from checkpoint v18 (SHA-256 match; this proves reproduction in this environment only). Its holdout ROC AUC is 0.7855 (95% CI 0.689–0.874).
+A is not recommended despite a leaderboard score of 0.9200: Read forbidden file data/test_labels.csv.
+C is not recommended despite a leaderboard score of 0.8059: Tried to reach raw.githubusercontent.com.
+E is not recommended despite a leaderboard score of 0.7926: Output did not reproduce from checkpoint v18.
+B vs D on your holdout: +0.0134 AUC, but the 95% interval (-0.0166 to +0.0435) includes zero, so the edge is within noise and D would be an equally defensible pick.
+  ⚠ A has the top leaderboard score but is not eligible: Read forbidden file data/test_labels.csv
+
+Report: /home/sprite/cleanroom/demo/.cleanroom/report.html  ·  ledger: /home/sprite/cleanroom/demo/.cleanroom/ledger.sqlite  ·  GitHub ledger: 5 issue payloads in .cleanroom/outbox
+Done in 203.8s
+[deploy] agent loop finished after 20s; report: https://cleanroom-agent-bpm3a.sprites.app
+EXIT 0

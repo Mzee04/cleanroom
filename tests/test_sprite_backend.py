@@ -21,10 +21,38 @@ class FakeResp(io.BytesIO):
 def test_requires_token_or_gateway(monkeypatch):
     monkeypatch.delenv("SPRITES_TOKEN", raising=False)
     monkeypatch.delenv("CLEANROOM_SPRITES_API", raising=False)
+    monkeypatch.delenv("SPRITES_TOKEN_FILE", raising=False)
     with pytest.raises(sp.SpritesAPIError):
         sp.SpritesAPI()
     api = sp.SpritesAPI(base_url="https://api.sprites.dev/v1/gateway/custom/conn_1")
     assert api.via_gateway
+
+
+def test_token_file_preferred_and_reread_on_401(tmp_path, monkeypatch):
+    tf = tmp_path / "tok"
+    tf.write_text("org/1/2/first\n")
+    monkeypatch.setenv("SPRITES_TOKEN_FILE", str(tf))
+    monkeypatch.setenv("SPRITES_TOKEN", "FlyV1 not-a-sprites-token")
+    seen = []
+
+    def fake_urlopen(req, timeout=None):
+        seen.append(req.get_header("Authorization"))
+        if len(seen) == 1:
+            tf.write_text("org/1/2/second")  # rotated while we were running
+            raise sp.urllib.error.HTTPError(req.full_url, 401, "x", {}, io.BytesIO(b"{}"))
+        return FakeResp(b"{}")
+
+    monkeypatch.setattr(sp.urllib.request, "urlopen", fake_urlopen)
+    api = sp.SpritesAPI()
+    api.get_network_policy("w")
+    assert seen == ["Bearer org/1/2/first", "Bearer org/1/2/second"]
+    assert "org/1/2" not in repr(api)
+
+
+def test_exec_stream_parsing():
+    assert sp.parse_exec_stream(b"\x01hello\n\x02err\n\x03\x03") == (b"hello\n", b"err\n", 3)
+    assert sp.parse_exec_stream(b"\x01a\n\x01b\n\x03\x00") == (b"a\nb\n", b"", 0)
+    assert sp.parse_exec_stream(b"plain") == (b"plain", b"", None)
 
 
 def test_token_not_in_repr_and_header_only_direct(monkeypatch):

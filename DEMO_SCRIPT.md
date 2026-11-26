@@ -7,10 +7,10 @@ VO: "This is my best submission. Before I send it, I ask my agent whether I'm al
 VO: "Clean Room reads the competition's own rules and turns them into a policy. Every rule keeps its
 clause number and the exact quote." Highlight: `forbid_file test_labels.csv (rule 1.2)`, `deny_network (rule 2.1)`.
 
-**0:22–0:40 · Two Sprites.** Diagram: agent Sprite → connector → worker Sprite.
+**0:22–0:40 · Two Sprites.** Diagram: agent Sprite → Sprites API → worker Sprite.
 VO: "Candidates run on a worker Sprite with egress denied by a network policy set from outside,
-so the code can't loosen it. Every candidate starts from the same checkpoint. The agent drives it
-through a Sprites connector, so it never holds my token."
+so the code can't loosen it. Every candidate starts from the same checkpoint. The worker never sees
+a single credential."
 Screen: `cleanroom agent` scrolling through steps 1–4.
 
 **0:40–0:58 · Red flags, with evidence.** Zoom on A's finding.

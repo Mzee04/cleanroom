@@ -52,7 +52,7 @@ Clean Room needs three things a plain container makes awkward, and Sprites provi
 | --- | --- |
 | Run untrusted competition code with no internet | **Network policy**, set from *outside* the Sprite through the Sprites API, read-only inside at `/.sprite/policy/network.json`. The code under test cannot loosen it. |
 | Start every candidate from the identical machine, and re-run later to prove reproduction | **Checkpoints** (`POST /v1/sprites/{name}/checkpoint`, restore by id). Copy-on-write, so one per candidate is cheap. |
-| Let the agent drive the worker without holding a long-lived secret | **Connectors**: a Custom API connector wraps the Sprites API itself, restricted to the agent Sprite (name prefix) and to the worker's endpoints. Optional GitHub connector for a ledger; optional OpenRouter/LLM connector for a plain-language verdict. |
+| Keep secrets away from the code under test | The worker never receives any credential. The agent drives it over the Sprites API with a token kept in a private 0600 file on the agent Sprite. **Connectors** keep the other credentials off both Sprites: a GitHub connector for the submission ledger, and optionally an OpenRouter/LLM connector for a plain-language verdict. |
 | A report you can open from anywhere | Every Sprite has an HTTPS URL routed to port 8080. |
 
 ### Two Sprites
@@ -61,8 +61,9 @@ Clean Room needs three things a plain container makes awkward, and Sprites provi
  you ──► cleanroom-agent (public URL :8080)              cleanroom-worker (private)
           • agent loop, rules → policy                    • runs candidate code
           • SQLite ledger, traces, report      Sprites    • egress: deny * (policy set from outside)
-          • GitHub ledger via connector     ───API via──► • strace + audit hook
-                                             connector    • checkpoint per run, restore = wipe
+          • GitHub ledger via connector     ──Sprites───► • strace + audit hook
+          • Sprites token: 0600 file          API         • checkpoint per run, restore = wipe
+                                                          • never sees any token
 ```
 
 Restoring a checkpoint wipes the worker's whole disk. That is the point (every run starts identical),
@@ -149,12 +150,19 @@ python3 deploy/deploy_sprites.py
 
 1. creates `cleanroom-worker` (private URL) and `cleanroom-agent` (public URL);
 2. sets the worker's network policy to `{"rules":[{"domain":"*","action":"deny"}]}`;
-3. creates a **Custom API connector** `cleanroom-sprites-api` wrapping `https://api.sprites.dev`,
-   usable only by Sprites named `cleanroom-agent*` and only for `/v1/sprites/cleanroom-worker/*`,
-   so the agent Sprite never holds your token;
+3. writes your Sprites token to `/home/sprite/.config/cleanroom/sprites_token` on the **agent** Sprite,
+   mode 0600, as the body of an fs-write request (never in a URL, command line, log or the report).
+   The agent reads it through `SPRITES_TOKEN_FILE`;
 4. uploads Clean Room + the demo to the agent and installs it;
 5. registers a Sprite **service** on port 8080 serving the live report;
-6. runs `cleanroom --backend sprite agent` once on the agent Sprite.
+6. starts `cleanroom --backend sprite agent` detached on the agent Sprite and follows its log
+   (a long single HTTP exec gets dropped by the proxy, so the loop runs under `setsid`).
+
+**Why not a connector for the Sprites token?** The first version wrapped the Sprites API in a
+Custom API connector so the agent would never hold the token. The Sprites gateway refuses that
+(`403 blocked: base URL targets the Sprites API itself`), so the token lives in a private file on the
+agent Sprite instead. The worker, which runs the untrusted code, never receives it: Clean Room passes
+candidates only the variables it sets itself.
 
 During `prepare`, the agent briefly opens the worker's egress to the platform defaults
 (`{"include":"defaults"}`) to install `strace` and the demo's Python packages, then sets the
@@ -171,26 +179,34 @@ curl -X POST https://api.sprites.dev/v1/sprites/cleanroom-worker/policy/network 
 sprite -s cleanroom-agent exec -- bash -c 'cd ~/cleanroom/demo && cleanroom --backend sprite agent'
 ```
 
-Connectors used: **Custom API connector (Sprites API)** for agent → worker control (required);
-**GitHub connector** for the submission ledger (`cleanroom agent --publish` with
+Connectors used: **GitHub connector** for the submission ledger (`cleanroom agent --publish` with
 `CLEANROOM_GITHUB_GATEWAY` and `CLEANROOM_GITHUB_REPO`; without `--publish` the issue payloads are
 written to `.cleanroom/outbox/` for review); optionally an **LLM connector** (OpenRouter, or Ollama Cloud
 through a custom API connector) via `CLEANROOM_LLM_BASE_URL` / `CLEANROOM_LLM_MODEL` for the
 plain-language verdict and an extra rules pass.
 
-### Sprite deployment status
+### Sprite deployment status (live run, 26 Nov 2026)
 
-The `SpriteBackend` and the deploy script are written against the documented Sprites API
-(OpenAPI v0.1.12) and covered by unit tests with a fake API, but **have not run against a live Sprite
-yet**. Things to confirm on the first live run:
+The full 7-step loop has run on real Sprites (`cleanroom-agent` driving `cleanroom-worker`); the
+log is in `docs/sample_sprite_run.txt`. Checked live:
 
-- whether `strace` can trace its own children inside a Sprite (Sprites do not grant `CAP_SYS_PTRACE`;
-  tracing your own children usually works). If not, the audit-hook fallback is used automatically and
-  the report says `tracer: audit`;
-- the exact response body of the non-TTY HTTP exec endpoint (Clean Room only relies on its own marker
-  lines and reads results back through the filesystem API);
-- that the network policy persists across checkpoint restores (Clean Room re-reads it after every
-  restore and records it).
+- **Egress denied:** with the `deny *` policy, inside the worker DNS is refused, HTTPS to
+  example.com fails and a raw-IP connect to 1.1.1.1:443 fails. Candidate C's DNS queries for
+  `raw.githubusercontent.com` show up in strace and go unanswered.
+- **strace works inside a Sprite**, tracing its own children (`tracer: strace+audit` for every run).
+- **Exec reply format:** the non-TTY HTTP exec returns frames: `0x01`+stdout, `0x02`+stderr,
+  then `0x03`+one exit-code byte. That is parsed by `parse_exec_stream`. Results still come back through
+  the filesystem API.
+- **Checkpoint / restore:** restoring wipes files written after the checkpoint, and every candidate
+  ran from the same checkpoint.
+- **Network policy survives a restore:** the API still reports `deny *` after a restore, and the DNS
+  probe taken during every restored run says `refused`.
+
+Known quirks:
+- `/.sprite/policy/network.json` was not present inside the worker even though the policy was
+  enforced, so Clean Room checks enforcement by probing rather than by reading that file.
+- One long HTTP exec gets dropped after a few minutes, so the deploy script starts the loop detached
+  and follows its log.
 
 ## Layout
 
