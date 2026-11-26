@@ -261,4 +261,4 @@ tests/                pytest suite
 
 ## Licence
 
-MIT.
+MIT, see [LICENSE](LICENSE).
