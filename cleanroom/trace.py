@@ -46,6 +46,7 @@ RESULT = re.compile(r"\)\s+=\s+(-?\d+|\?)" + _DECO + r"(?:\s+(E[A-Z0-9]+))?")
 DIRFD_RE = re.compile(_PFX + r"(?:openat2?|execveat)\((AT_FDCWD|-?\d+)" + _DECO + ",")
 CHDIR_RE = re.compile(_PFX + r"(chdir|fchdir)\(")
 FDPATH_RE = re.compile(r"^-?\d+<((?:\\x[0-9a-fA-F]{2}|[^>])*)>")
+RESUMED_RE = re.compile(r"^(?:\[pid\s+\d+\]\s+|\d+\s+)?<\.\.\. [a-z0-9_]+ resumed>(.*)$", re.S)
 EXIT_RE = re.compile(r"^(?:\[pid\s+\d+\]\s+|\d+\s+)?\+\+\+ (exited with -?\d+|killed by \w+)")
 OPEN_RE = re.compile(_PFX + r"(openat2|openat|open|creat)\(")
 CONNECT_RE = re.compile(_PFX + r"connect\((\d+)" + _DECO + r",\s*\{sa_family=(AF_\w+)(.*?)\}")
@@ -64,7 +65,7 @@ ARG_TOKEN = re.compile(r'"((?:\\x[0-9a-fA-F]{2}|\\.|[^"\\])*)"|\b(AT_FDCWD|-?\d+
 
 @dataclass
 class Event:
-    kind: str                 # open | connect | dns | exec | alias | modify | io_uring
+    kind: str                 # open | connect | dns | exec | alias | modify | io_uring | unix
     source: str               # strace | audit
     pid: int | None = None
     path: str = ""            # open/exec/alias source/modify: path as resolved
@@ -106,6 +107,10 @@ class Trace:
 
     def files_read(self) -> list[Event]:
         return [e for e in self.events if e.kind == "open" and e.mode in ("read", "rw")]
+
+    def unix_connects(self) -> list[Event]:
+        """Connections to Unix sockets by path (e.g. the Sprite's internal API socket)."""
+        return [e for e in self.events if e.kind == "unix"]
 
     def network_attempts(self) -> list[Event]:
         return [e for e in self.events if e.kind in ("connect", "dns")]
@@ -287,6 +292,17 @@ def parse_strace_file(path: Path, display_name: str | None = None, state: dict |
             if EXIT_RE.match(line):
                 st["exited"] = True
                 continue
+            # a syscall interrupted mid-way is split into "<unfinished ...>" and "<... name resumed>"
+            if "<unfinished ...>" in line:
+                st["pending"] = line.split("<unfinished ...>", 1)[0].rstrip()
+                continue
+            rm = RESUMED_RE.match(line)
+            if rm:
+                head = st.pop("pending", None)
+                if head is None:
+                    st["orphan_resumed"] = st.get("orphan_resumed", 0) + 1
+                    continue
+                line = head + rm.group(1)
             ev = parse_strace_line(line, pid, st)
             if ev is None:
                 continue
@@ -350,6 +366,12 @@ def parse_strace_line(line: str, pid: int | None = None, state: dict | None = No
     m = CONNECT_RE.match(line)
     if m:
         fam, rest = m.group(3), m.group(4)
+        if fam == "AF_UNIX":
+            pm = re.search(r'sun_path=(@?)"((?:\\x[0-9a-fA-F]{2}|\\.|[^"\\])*)"', rest)
+            if not pm:
+                return None
+            upath = ("@" if pm.group(1) else "") + _s(pm.group(2))
+            return Event("unix", "strace", pid, path=upath, ok=ok, errno=err, line=pretty, op="connect")
         if fam not in ("AF_INET", "AF_INET6"):
             return None
         sa = _sockaddr("{sa_family=" + fam + rest + "}")
@@ -490,9 +512,13 @@ def _audit_events(rec: dict) -> list[Event]:
             return [Event("dns", "audit", pid, host=host, port=_int(rec.get("port")), op=kind)]
     if kind in ("socket.connect", "socket.sendto"):
         addr = rec.get("addr")
+        if isinstance(addr, str) and addr.startswith(("/", "@", "\x00")):
+            return [Event("unix", "audit", pid, path=addr.replace("\x00", "@", 1), op=kind)]
         if isinstance(addr, list) and addr:
             a = str(addr[0])
-            if _is_loopback(a) or a.startswith("/"):
+            if a.startswith("/") or a.startswith("@"):
+                return [Event("unix", "audit", pid, path=a, op=kind)]
+            if _is_loopback(a):
                 return []
             port = _int(addr[1] if len(addr) > 1 else None)
             try:

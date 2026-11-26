@@ -253,6 +253,26 @@ def _under(path: str, roots: list[str]) -> bool:
     return any(p == r or p.startswith(r.rstrip("/") + "/") for r in roots if r)
 
 
+SANDBOX_SOCKET_PREFIXES = ("/.sprite/",)
+
+
+def check_sandbox(trace: Trace) -> list[Finding]:
+    """The candidate tried to reach the Sprite's own management API (/.sprite/api.sock).
+
+    That socket can start services and create or restore checkpoints from inside the Sprite,
+    i.e. run code outside the trace. Any attempt, successful or not, is disqualifying.
+    """
+    roots = SANDBOX_SOCKET_PREFIXES + tuple(
+        m.rstrip("/") + "/" for m in (trace.meta or {}).get("mask_paths", []) if m)
+    hits = [e for e in trace.unix_connects() if e.path.startswith(roots)]
+    if not hits:
+        return []
+    return [Finding(FAIL, "sandbox_escape_attempt", "Tried to reach the Sprite's management API",
+                    f"Connected to {hits[0].path}, the socket that can start services and restore "
+                    "checkpoints outside Clean Room's trace. Candidate code has no reason to touch it.",
+                    evidence=[e.evidence() for e in hits][:MAX_EVIDENCE])]
+
+
 def check_tamper(trace: Trace) -> list[Finding]:
     """The candidate wrote to, truncated, renamed or deleted Clean Room's own evidence."""
     meta = trace.meta or {}
@@ -308,6 +328,23 @@ def check_trace(trace: Trace, tracer: str | None = None) -> list[Finding]:
                            f"{trace.incomplete_files} of {trace.strace_files} traced process(es) have no exit "
                            "record: strace was killed or detached, or the trace was cut short or edited."))
     meta = trace.meta or {}
+    if meta.get("untraced_procs"):
+        out.append(Finding(INCONCLUSIVE, "untraced_process", "A candidate process ran outside the trace",
+                           "A process of the candidate's uid had no tracer attached (for example one made with "
+                           "clone(CLONE_UNTRACED)); whatever it did is not in the trace. It was killed.",
+                           evidence=list(meta["untraced_procs"])[:MAX_EVIDENCE]))
+    if meta.get("seccomp") == "off" and "strace" in trace.sources:
+        out.append(Finding(WARN, "untraced_clone_not_blocked", "Untraced child processes were not blocked",
+                           "The seccomp filter that refuses clone(CLONE_UNTRACED) was not installed for this run; "
+                           "Clean Room still looked for untraced processes while the run was going."))
+    if meta.get("audit_truncated"):
+        out.append(Finding(INCONCLUSIVE, "audit_truncated", "The audit log hit its size limit",
+                           "The candidate wrote more audit records than Clean Room keeps; the rest were "
+                           "dropped, so the audit side of the trace is incomplete."))
+    if meta.get("mask") == "failed":
+        out.append(Finding(WARN, "mask_failed", "Could not hide the Sprite management socket from the candidate",
+                           "Paths " + ", ".join(meta.get("mask_paths", [])) + " stayed visible. Connections to "
+                           "them are still traced and fail the run."))
     if meta.get("strace_signalled"):
         out.append(Finding(INCONCLUSIVE, "tracer_killed", "strace itself was killed during the run",
                            f"strace ended with status {meta.get('strace_exit')}; processes it traced may have "
@@ -336,7 +373,7 @@ def analyse(trace: Trace, policy: Policy, workdir: str, exit_code: int, output_s
     """Findings for one run. Fails closed: with an unusable trace no PASS finding is kept."""
     f = check_run(exit_code, output_sha, output)
     gate = check_trace(trace, tracer)
-    f += gate + check_tamper(trace)
+    f += gate + check_tamper(trace) + check_sandbox(trace)
     found = check_files(trace, policy, workdir, outputs or [output], own_files)
     found += check_network(trace, policy, enforced)
     if any(x.severity == INCONCLUSIVE for x in gate):

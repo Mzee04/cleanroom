@@ -65,7 +65,7 @@ if _log:
                     pass
             elif event in ("socket.connect", "socket.sendto"):
                 addr = args[1]
-                rec.update(addr=list(addr) if isinstance(addr, tuple) else str(addr))
+                rec.update(addr=list(addr) if isinstance(addr, tuple) else _p(addr))
             elif event in ("socket.getaddrinfo", "socket.gethostbyname"):
                 rec.update(host=_p(args[0]), port=args[1] if len(args) > 1 else None)
             elif event in ("os.symlink", "os.link", "os.rename"):

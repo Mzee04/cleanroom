@@ -31,6 +31,7 @@ import tarfile
 import time
 from pathlib import Path
 
+from .._runner.runner import egress_blocked
 from ..trace import STRACE_ARGS
 from .base import (HOOK_DIR, RUNNER, Backend, RunResult, RunSpec, base_env, extract_bundle, sha256_file,
                    state_root, tail)
@@ -204,6 +205,7 @@ class LocalBackend(Backend):
             "strace": use_strace, "strace_args": STRACE_ARGS,
             "netns": "unshare" if (caps["unshare_net"] or sep) else "none",
             "scan_dirs": [str(wd)], "bundle_owner": os.environ.get("USER") or None,
+            "egress_probe": bool(caps["unshare_net"] or sep),
         }
         spec_path = self.root / f"spec-{token}.json"
         spec_path.write_text(json.dumps(rspec))
@@ -237,7 +239,8 @@ class LocalBackend(Backend):
                          tracer=meta.get("tracer", "none"), network=self._network_desc(caps),
                          stdout_tail=so, stderr_tail=se, notes=notes,
                          egress_verified=bool(caps["unshare_net"] and caps.get("egress_probe_refused")
-                                              and rspec["netns"] == "unshare"),
+                                              and rspec["netns"] == "unshare"
+                                              and egress_blocked(meta.get("egress_probe"))),
                          candidate_uid=meta.get("candidate_uid", "same"))
 
     def run_from_checkpoint(self, checkpoint_id, spec, trace_dir, hide=()):

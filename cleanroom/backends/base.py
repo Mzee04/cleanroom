@@ -25,6 +25,7 @@ from pathlib import Path, PurePosixPath
 
 HOOK_DIR = Path(__file__).resolve().parent.parent / "_hook"
 RUNNER = Path(__file__).resolve().parent.parent / "_runner" / "runner.py"
+SECCOMP = RUNNER.with_name("seccomp_exec.py")
 MAX_MEMBER = 256 << 20
 MAX_BUNDLE = 1 << 30
 # variables a candidate run may inherit from the caller; everything else is dropped

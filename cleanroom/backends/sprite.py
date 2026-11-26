@@ -40,8 +40,9 @@ from pathlib import Path
 
 import secrets
 
+from .._runner.runner import egress_blocked
 from ..trace import STRACE_ARGS
-from .base import HOOK_DIR, RUNNER, Backend, RunResult, RunSpec, extract_bundle, sha256_file, tail
+from .base import HOOK_DIR, RUNNER, SECCOMP, Backend, RunResult, RunSpec, extract_bundle, sha256_file, tail
 from .local import EXCLUDE_DIRS
 
 DEFAULT_API = "https://api.sprites.dev"
@@ -270,10 +271,16 @@ class SpriteBackend(Backend):
                  setup: list[str] | None = None, private: list[str] | None = None, **kw):
         super().__init__(project, private=private)
         self.worker = worker or os.environ.get("CLEANROOM_WORKER", "cleanroom-worker")
-        self.api = api or SpritesAPI()
+        self._api = api          # created on first use: `report` never needs the Sprites token
         self.setup_cmds = setup or []
         self._caps = None
         self._policy_evidence = {}
+
+    @property
+    def api(self) -> SpritesAPI:
+        if self._api is None:
+            self._api = SpritesAPI()
+        return self._api
 
     def describe(self):
         return {"backend": self.name, "worker": self.worker, "api": self.api.base.split("/v1/")[0]
@@ -376,6 +383,7 @@ class SpriteBackend(Backend):
             timeout=600)
         self._put((HOOK_DIR / "sitecustomize.py").read_bytes(), f"{REMOTE_HOOK}/sitecustomize.py")
         self._put(RUNNER.read_bytes(), f"{REMOTE_BIN}/runner.py")
+        self._put(SECCOMP.read_bytes(), f"{REMOTE_BIN}/seccomp_exec.py")
         self._put(_tar_project(self.project, self.is_private), "/tmp/cr-project.tgz", mode="0600")
         self._sh(f"sudo rm -rf {REMOTE_WORK} && sudo mkdir -p {REMOTE_WORK} && "
                  f"sudo tar -xzf /tmp/cr-project.tgz -C {REMOTE_WORK} --no-same-owner && sudo rm -f /tmp/cr-project.tgz && "
@@ -461,6 +469,7 @@ class SpriteBackend(Backend):
                  "timeout": int(spec.timeout), "outputs": outs, "hide": list(hide),
                  "user": CANDIDATE_USER, "home": REMOTE_HOME, "strace": True, "strace_args": STRACE_ARGS,
                  "netns": "none", "ptrace_userns": True, "dns_probe": True, "bundle_owner": "sprite",
+                 "egress_probe": True, "mask_paths": ["/.sprite"],
                  "scan_dirs": [REMOTE_WORK, REMOTE_HOME, "/tmp", "/var/tmp", "/dev/shm"]}
         self._launch_and_wait(rspec, int(spec.timeout))
         bundle = self.api.read_file(self.worker, rspec["bundle"])
@@ -477,13 +486,16 @@ class SpriteBackend(Backend):
             p = trace_dir / n
             return p.read_text(errors="replace") if p.exists() else ""
         dns = meta.get("dns_probe", "unknown")
+        probe = meta.get("egress_probe") or {}
+        probe_txt = ", ".join(f"{k} {v}" for k, v in probe.items()) or "not run"
         res = RunResult(exit_code=int(meta.get("rc", 1)), duration_s=int(meta.get("ms", 0)) / 1000,
                         workdir=REMOTE_WORK, trace_dir=str(trace_dir), output_sha256=sha, outputs=outputs,
                         tracer=meta.get("tracer", "none"),
-                        network=f"Sprite network policy (set from outside); DNS probe during run: {dns}",
+                        network=(f"Sprite network policy (set from outside); probe as the candidate uid before "
+                                 f"the run: {probe_txt}; DNS after the run: {dns}"),
                         stdout_tail=tail(rd("stdout.txt")), stderr_tail=tail(rd("stderr.txt")),
                         notes=notes + meta.get("output_problems", []),
-                        egress_verified=self._egress_verified() and dns == "refused",
+                        egress_verified=self._egress_verified() and egress_blocked(probe) and dns == "refused",
                         candidate_uid=meta.get("candidate_uid", "same"))
         if meta.get("hidden"):
             res.notes.append("hidden for this run: " + ", ".join(meta["hidden"]))

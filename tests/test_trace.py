@@ -28,7 +28,7 @@ def test_open_relative_to_dirfd_is_not_treated_as_cwd():
     assert ev.path.startswith("/<fd 3>/")
 
 
-def test_connect_inet_and_skip_loopback_and_unix():
+def test_connect_inet_skip_loopback_and_record_unix():
     line = (f'connect(3, {{sa_family=AF_INET, sin_port=htons(443), sin_addr=inet_addr("{hx("140.82.112.3")}")}}, 16)'
             " = -1 ENETUNREACH (Network is unreachable)")
     ev = parse_strace_line(line)
@@ -37,7 +37,11 @@ def test_connect_inet_and_skip_loopback_and_unix():
     lo = f'connect(3, {{sa_family=AF_INET, sin_port=htons(80), sin_addr=inet_addr("{hx("127.0.0.1")}")}}, 16) = 0'
     assert parse_strace_line(lo) is None
     ux = f'connect(4, {{sa_family=AF_UNIX, sun_path="{hx("/var/run/nscd/socket")}"}}, 110) = -1 ENOENT'
-    assert parse_strace_line(ux) is None
+    uev = parse_strace_line(ux)   # Unix sockets are recorded (not network): the Sprite API socket is one
+    assert uev.kind == "unix" and uev.path == "/var/run/nscd/socket" and not uev.ok
+    api = f'connect(4<socket:[9]>, {{sa_family=AF_UNIX, sun_path="{hx("/.sprite/api.sock")}"}}, 110) = 0'
+    aev = parse_strace_line(api)
+    assert aev.kind == "unix" and aev.path == "/.sprite/api.sock" and aev.ok
     inprog = line.replace("-1 ENETUNREACH (Network is unreachable)", "-1 EINPROGRESS (Operation now in progress)")
     assert parse_strace_line(inprog).ok
 
