@@ -71,9 +71,14 @@ FILE_NEG = re.compile(
     r"\b(?:prohibited|forbidden|disallowed|banned|off[- ]limits|not (?:be )?(?:permitted|allowed)|"
     r"restricted to|reserved for|withheld|kept (?:private|secret|hidden)|confidential|strictly for|"
     r"(?:only )?for (?:the )?organi[sz]ers?(?:'|\u2019)?(?: \w+)? (?:use |scoring )?only|organi[sz]ers? only|"
-    r"only for (?:the )?organi[sz]ers?|no access)\b",
+    r"only for (?:the )?organi[sz]ers?|no access|violat\w*|disqualif\w*|breach\w*|"
+    r"not to be (?:used|read|accessed|opened|loaded))\b"
+    r"|^\W*not\b",       # "... train.csv but not test_labels.csv" (the split leaves "not test_labels.csv")
     re.I,
 )
+# Words that only say a file exists or was handed out. They do not grant permission when the
+# same clause also restricts access ("test_labels.csv is provided but must not be read").
+WEAK_POS = re.compile(r"\b(provided|supplied|available to participants|included|shipped)\b", re.I)
 FILE_POS = re.compile(
     r"\b(may use|may be used|may read|may load|may access|can use|can be used|are free to|is free to|"
     r"permitted|allowed|you may|participants may|is fine|are fine|encouraged|provided|supplied|"
@@ -117,6 +122,10 @@ class Policy:
 
     def forbidden_file_rule(self, path: str) -> Rule | None:
         for r in self.of("forbid_file"):
+            # globs inferred from wording ("labels are withheld" -> *label*.csv) only apply to the
+            # project, never to system or library files elsewhere on the machine
+            if r.source == "inferred" and path.startswith("/"):
+                continue
             if path_matches(path, r.target):
                 return r
         return None
@@ -177,7 +186,7 @@ class Policy:
         return {"rules_sha256": self.rules_sha256, "rules": [asdict(r) for r in self.rules],
                 "notes": self.notes, "unmapped": self.unmapped}
 
-    def with_config_rules(self, rules: list[dict]) -> "Policy":
+    def with_config_rules(self, rules: list[dict]) -> Policy:
         """Add rules that come from cleanroom.json rather than the rules text (e.g. holdout truth)."""
         have = {r.key() for r in self.rules}
         for d in rules:
@@ -188,7 +197,7 @@ class Policy:
         return self
 
     @classmethod
-    def from_dict(cls, d: dict) -> "Policy":
+    def from_dict(cls, d: dict) -> Policy:
         return cls(rules=[Rule(**r) for r in d.get("rules", [])],
                    rules_sha256=d.get("rules_sha256", ""), notes=d.get("notes", []),
                    unmapped=d.get("unmapped", []))
@@ -198,18 +207,19 @@ class Policy:
         path.write_text(json.dumps(self.to_dict(), indent=2))
 
     @classmethod
-    def load(cls, path: Path) -> "Policy":
+    def load(cls, path: Path) -> Policy:
         return cls.from_dict(json.loads(Path(path).read_text()))
 
 
 # ---- matching helpers ------------------------------------------------------
 def path_matches(path: str, target: str) -> bool:
-    p = path.replace("\\", "/")
-    t = target.replace("\\", "/")
+    """Case-insensitive glob match: rules often capitalise file names differently from the files."""
+    p = path.replace("\\", "/").lower()
+    t = target.replace("\\", "/").lower()
     base = p.rsplit("/", 1)[-1]
     if "/" in t:
-        return fnmatch.fnmatch(p, t) or fnmatch.fnmatch(p, "*/" + t)
-    return fnmatch.fnmatch(base, t)
+        return fnmatch.fnmatchcase(p, t) or fnmatch.fnmatchcase(p, "*/" + t)
+    return fnmatch.fnmatchcase(base, t)
 
 
 def host_matches(host: str, target: str) -> bool:
@@ -300,14 +310,24 @@ def extract_policy(text: str) -> Policy:
             pol.rules.append(r)
 
     for c in split_clauses(text):
-        n_before = hits[0]
+        n_before = len(pol.rules)
+        hits_before = hits[0]
         restrictive = False
         subs = [s for s in SPLIT_SUB.split(c.text) if s.strip()] or [c.text]
+        # A sub-clause that restricts access but names no file, host, internet or external data
+        # ("... but must not be read by participant code") is about the files named elsewhere in
+        # the same clause. "Do not use external data; train.csv is provided" is not.
+        dangling_neg = any(
+            _file_polarity(sb) < 0 and not FILE_RE.search(sb) and not HOST_RE.search(sb)
+            and not INTERNET_RE.search(sb) and not EXTDATA_RE.search(sb) for sb in subs)
         for sub in subs:
             # each sub-clause carries its own polarity: "Do not use external data; train.csv is
             # provided" must not leak the first half's negation into the second
             pol_sub = _polarity(sub)
             fpol = _file_polarity(sub)
+            strong_pos = FILE_POS.search(WEAK_POS.sub("", sub))
+            if dangling_neg and fpol >= 0 and not strong_pos and FILE_RE.search(sub):
+                fpol = -1
             restrictive = restrictive or fpol < 0 or pol_sub < 0
             files = [f for f in FILE_RE.findall(sub)]
             hosts = [h.lower() for h in HOST_RE.findall(sub)
@@ -338,7 +358,9 @@ def extract_policy(text: str) -> Policy:
         if REPRO_RE.search(c.text) and re.search(
                 r"\b(must|should|required?|fixed?|same|identical|deterministic)\b", c.text, re.I):
             add("require_reproducible", "", c)
-        if restrictive and hits[0] == n_before:
+        added = pol.rules[n_before:]
+        only_allows = bool(added) and all(r.kind.startswith("allow") for r in added)
+        if restrictive and (hits[0] == hits_before or only_allows):
             pol.unmapped.append(f"{c.clause_id}: {c.text}")
             pol.notes.append(f"Clause {c.clause_id} reads like a restriction but Clean Room could not turn it "
                              f"into a check: \u201c{c.text[:200]}\u201d. Check it by hand.")
