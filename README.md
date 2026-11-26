@@ -51,7 +51,7 @@ Clean Room needs three things a plain container makes awkward, and Sprites provi
 
 | Need | Sprite feature |
 | --- | --- |
-| Run untrusted competition code with no internet | **Network policy**, set from *outside* the Sprite through the Sprites API, read-only inside at `/.sprite/policy/network.json`. The code under test cannot loosen it. |
+| Run untrusted competition code with no internet | **Network policy**, set from *outside* the Sprite through the Sprites API. The code under test cannot loosen it through the policy file; Clean Room also hides the Sprite's internal API socket from candidates (see "Sandbox hardening"), and confirms the denial by probing as the candidate's uid rather than by reading a file. |
 | Start every candidate from the identical machine, and re-run later to prove reproduction | **Checkpoints** (`POST /v1/sprites/{name}/checkpoint`, restore by id). Copy-on-write, so one per candidate is cheap. |
 | Keep secrets away from the code under test | The worker never receives any credential. The agent drives it over the Sprites API with a token kept in a private 0600 file on the agent Sprite. The **Sprites GitHub connector** keeps the GitHub credential off both Sprites: the agent posts the verdict ledger through the Sprites gateway, and the connector's policy admits only `cleanroom-agent*` and only the ledger repo's paths. |
 | A report you can open from anywhere | Every Sprite has an HTTPS URL routed to port 8080. |
@@ -78,14 +78,18 @@ is strong evidence in that cooperative setting. It is **not** a sandbox for host
 findings are not proof that a submission is clean.
 
 What a PASS means: on the Sprite worker, the candidate ran as a separate uid (`cr-cand`) under
-`strace -f`, from a checkpoint, with egress denial verified from inside the worker; every traced
+`strace -f`, from a checkpoint, with egress denial checked from inside the worker (a probe run as the
+candidate's uid before the run, and a DNS probe after it); every traced
 process exited normally; no traced open, link, rename or network call matched a forbidden rule; and
 the output reproduced byte for byte from the same checkpoint.
 
 What it does not cover:
 
-- **Leakage that never touches a file at run time:** labels already mixed into the training data,
-  answers typed into the code, a model trained elsewhere, side channels.
+- **Leakage that never touches a forbidden file at run time:** labels already mixed into the training
+  data, answers typed into the code, a model trained elsewhere, side channels, or labels rebuilt from
+  public data. The demo is built from scikit-learn's public diabetes set, so a candidate could call
+  `load_diabetes()` (a file inside the library, not a forbidden file) and match rows to recover every
+  label; Clean Room would not flag that.
 - **Hostile code.** A determined adversary with kernel bugs, `io_uring` (flagged, not traced), shared
   memory tricks or races between a path check and its use can hide from syscall tracing. Clean Room
   fails closed where it can: a missing, empty, truncated, corrupt or edited trace, a killed tracer or an
@@ -96,15 +100,18 @@ What it does not cover:
 - **Reproduction is "reproduced in the recorded environment"**: same checkpoint, same library
   versions, same hardware (the environment fingerprint is recorded with every run). Other machines may
   differ. Clean Room sets `PYTHONHASHSEED=0`; your code must seed its own RNGs.
-- **"The output did not need the download"** is only claimed when egress denial was verified for that
-  run (DNS refused, HTTPS and raw-IP connects blocked).
+- **"The output did not need the download"** is only claimed when egress denial was checked for that
+  run: a probe as the candidate's uid just before the run (DNS lookup, TCP to 1.1.1.1:443, 8.8.8.8:53
+  and 9.9.9.9:443, UDP to 8.8.8.8:53, all refused or failing) and a DNS probe as root after it. It
+  is a check of a handful of destinations, not proof that every address was unreachable.
 - **Investigation is a one-factor re-run.** It first re-runs the candidate unchanged (the determinism
   baseline), then re-runs with one flagged file hidden. If the baseline already differs, the result is
   "inconclusive", not "the score depends on the file". The report lists which flags were investigated
   and which remain.
 - **The honest score is about your holdout**, not the private leaderboard. The 95% interval of the
   top pick is optimistic (it was chosen as the maximum); the paired, id-aligned comparison is the
-  better guide. A candidate whose seed spread could not be measured ranks below one whose spread was.
+  better guide. Ranking is by holdout score; seed spread is only a tie-break between equal holdout
+  scores (an unmeasured spread loses that tie-break), and a large spread on the pick adds a caution.
 - **Rules-to-policy is heuristic.** Every rule keeps its clause id and verbatim quote; restrictive
   clauses that map to no rule are listed as "unmapped" in the policy table. An optional LLM pass can
   add rules, but only when its quote appears verbatim in the rules text and names the rule's target.
@@ -130,6 +137,23 @@ What it does not cover:
   thread settings), the whole process group is killed on timeout, and logs are capped at 8 MB.
   Traces and checkpoints live outside the project, under `~/.local/state/cleanroom/`.
 
+### Sandbox hardening (worker)
+
+- **The Sprite's internal API is hidden.** Every Sprite has a socket at `/.sprite/api.sock` that can
+  manage services and checkpoints, and it is world-writable. Each candidate runs in its own mount
+  namespace with a read-only empty tmpfs over `/.sprite`, so the socket is not there; the runner checks
+  the mask took effect (else WARN `mask_failed`). Any traced `connect` to a path under `/.sprite/`
+  fails the run (`sandbox_escape_attempt`).
+- **No untraced children.** `clone(CLONE_UNTRACED)` would start a process strace never sees. A small
+  seccomp filter (`_runner/seccomp_exec.py`) refuses it, refuses `clone3` (so libc falls back to
+  `clone`) and refuses non-native syscall ABIs; if the filter cannot be installed the run does not
+  start. As a backup, the runner polls for processes of the candidate uid that strace is not tracing
+  and marks the run INCONCLUSIVE (`untraced_process`) if it finds one.
+- **Resource limits** for the candidate: 1024 processes, 4 GB per file, 4096 open files; the audit log
+  is capped at 64 MB (beyond that the run is INCONCLUSIVE, `audit_truncated`).
+- Leftover candidate processes are found by the uid in `/proc/<pid>/status` (which a non-dumpable
+  process cannot hide) and killed before and after every run.
+
 ### Tracing notes
 
 - strace runs as `strace -f -ff -y -xx` over `openat`, `openat2`, `execve`, `execveat`, `connect`,
@@ -139,7 +163,13 @@ What it does not cover:
 - Paths are resolved through the working directory and the `-y` file-descriptor decorations; reads
   through a symlink, hard link or rename of a forbidden file count as reads of that file, and a
   post-run scan reports symlinks and hard links that point at forbidden files.
-- Non-DNS UDP (`sendto` with an address) and IPv6 addresses count as network attempts.
+- Non-DNS UDP (`sendto` with an address) and IPv6 addresses count as network attempts. Connects to
+  Unix sockets are recorded too.
+- Not traced: `write`/`send` on an already connected UDP socket, and connects to loopback addresses
+  are skipped. A DNS query sent with connect+write to a local stub resolver is therefore invisible.
+  Egress is still denied, so this hides intent, not a download.
+- strace lines split by `<unfinished ...>` / `<... resumed>` are joined before parsing; a resumed half
+  with no start counts as a parse gap.
 - `ptrace` needs permission. When strace cannot attach, the run says `tracer: audit` and is capped at
   WARN.
 
@@ -158,6 +188,11 @@ The agent Sprite holds the Sprites API token and the ledger, so treat it as the 
 - Keep the agent Sprite single-purpose: no other services, no shell sharing.
 
 ### Token rotation
+
+The Sprites token is **org-wide**: it can manage every Sprite in the organisation, including the
+worker's network policy. It lives only on the agent Sprite, is read only by the agent loop (the public
+report service is started without `SPRITES_TOKEN_FILE`), and should be rotated after a demo or
+hackathon. Use a narrower token if Sprites offers one.
 
 The Sprites token lives in `/home/sprite/.config/cleanroom/sprites_token` (mode 0600) on the agent
 Sprite only. To rotate it: create a new token at https://sprites.dev/account (or `sprite login`),
@@ -262,11 +297,22 @@ Clean Room's Sprites connector is **GitHub** (OAuth). Every session, the agent S
 per candidate in a ledger repo: verdict, session, checkpoint, output SHA-256, reproduction result,
 tracer and candidate uid, environment fingerprint, the rule clauses quoted word for word and the
 trace lines behind each finding (redacted: no raw command lines or home paths; candidate-controlled
-text is Markdown-escaped). Publishing is idempotent: re-running a session updates its issues instead
-of opening duplicates. Each issue carries a canonical JSON record, its SHA-256 and the SHA-256 of the
-record published before it, so the issues form a hash chain. That is tamper-evident (an edit breaks
-the chain, and GitHub keeps an edit history), not tamper-proof: nothing is signed or externally
-timestamped. The report links each
+text is Markdown-escaped). Publishing is idempotent: re-publishing an unchanged session changes
+nothing, and a session whose result changed gets a **revision record** appended to its existing issue
+(the earlier record stays in the issue unchanged; the new one names it in `supersedes`). Each record is
+canonical JSON with a sequence number, its SHA-256 and the SHA-256 of the record published before it,
+so the records form a hash chain across all issues. Only a marker that is a whole line and whose JSON
+block hashes to it is trusted, so text inside evidence cannot pose as a record. Check the chain any time:
+
+```bash
+cleanroom verify-chain --repo you/cleanroom-ledger   # public API for a public repo; exit 1 if broken
+```
+
+It re-hashes every record, and checks the JSON against its marker, the sequence (1, 2, 3, ... with no
+gaps), every `previous_issue_sha256` link and every `supersedes` reference. That is tamper-evident (an
+edit or a deleted issue breaks the chain, and GitHub keeps an edit history), not tamper-proof: nothing
+is signed or externally timestamped, and someone with write access could rewrite the whole chain. The
+report links each
 candidate to its issue, so a decision you made before a deadline stays on record outside the Sprites.
 
 The Sprite never holds a GitHub token. It calls
@@ -310,7 +356,9 @@ log is in `docs/sample_sprite_run.txt`. Checked live:
   strace from inside a uid-mapping user namespace (a Sprite's root has no `CAP_SYS_PTRACE`, so plain
   `strace -u` is refused), plus the audit hook through a root-drained FIFO.
 - **Exec reply format:** the non-TTY HTTP exec returns frames: `0x01`+stdout, `0x02`+stderr,
-  then `0x03`+one exit-code byte. That is parsed by `parse_exec_stream`. Results come back as a tar
+  then `0x03`+one exit-code byte. That is parsed by `parse_exec_stream`. The parser is meant for text
+  output: a `0x01`/`0x02` byte inside binary output would be read as a stream switch, so Clean Room
+  moves anything binary through the filesystem API instead. Results come back as a tar
   bundle through the filesystem API and are unpacked with path, link and size checks.
 - **Checkpoint / restore:** restoring wipes files written after the checkpoint, and every candidate
   ran from the same checkpoint.
