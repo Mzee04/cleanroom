@@ -79,13 +79,13 @@ def run_agent(proj: Project, honest: bool = True, publish_github: bool = False, 
     # 5. investigate
     log(_c("B", "\n[5/7] Investigating red flags", color))
     flagged = [n for n in proj.ledger.candidates()
-               if any(f["severity"] == "FAIL" for f in proj.ledger.latest(n)["findings"])]
+               if any(f["severity"] == "FAIL" for f in (proj.ledger.latest(n) or {}).get("findings", []))]
     if not flagged:
         log("  nothing to investigate")
     for n in flagged:
         try:
-            for r in proj.investigate(n):
-                v = r.get("verdict") or r["data"].get("verdict")
+            for inv in proj.investigate(n):
+                v = inv.get("verdict") or inv["data"].get("verdict")
                 log(f"  {n}: {v}")
         except Exception as e:  # noqa: BLE001 - one candidate's failure must not stop the others
             log(f"  {n}: investigation could not complete ({type(e).__name__}: {str(e)[:200]})")

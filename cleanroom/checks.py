@@ -70,7 +70,8 @@ def _alias_map(trace: Trace, workdir: str) -> dict[str, str]:
 
 def _origin(path: str, aliases: dict[str, str]) -> list[str]:
     """``path`` followed back through aliases (at most 16 hops, cycles stop)."""
-    chain, seen = [], {path}
+    chain: list[str] = []
+    seen = {path}
     while path in aliases and len(chain) < 16:
         path = aliases[path]
         if path in seen:
@@ -125,7 +126,7 @@ def check_files(trace: Trace, policy: Policy, workdir: str, outputs: list[str],
                                evidence=[e.evidence() for e in ok_evs][:MAX_EVIDENCE]))
     # a new name for a forbidden file is a red flag even if the alias is never read
     alias_evs = [e for e in trace.links() if policy.forbidden_file_rule(normalise_path(e.path, workdir))]
-    traced_new = set()
+    traced_new: set[str] = set()
     for src, evs in _group(alias_evs, lambda e: normalise_path(e.path, workdir)).items():
         traced_new.update(normalise_path(e.path2, workdir) for e in evs)
         out.append(Finding.with_rule(

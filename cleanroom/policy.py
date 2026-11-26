@@ -240,27 +240,29 @@ def split_clauses(text: str) -> list[Clause]:
     """Split rules text into clauses (numbered items or sentences)."""
     clauses: list[Clause] = []
     blocks: list[tuple[str, list[str]]] = []
-    current_id, current_lines = None, []
+    current_id: str | None = None
+    current_lines: list[str] = []
     for lineno, raw in enumerate(text.splitlines(), 1):
         line = raw.strip()
         if not line:
             if current_lines:
-                blocks.append((current_id, current_lines))
+                blocks.append((current_id or f"line {lineno}", current_lines))
             current_id, current_lines = None, []
             continue
         m = CLAUSE_ID_RE.match(line)
         bullet = re.match(r"^[-*•]\s+", line)
         if m or bullet:
             if current_lines:
-                blocks.append((current_id, current_lines))
+                blocks.append((current_id or f"line {lineno}", current_lines))
             current_id = m.group(1) if m else f"line {lineno}"
-            current_lines = [line[m.end():] if m else line[bullet.end():]]
+            start = (m or bullet).end()  # type: ignore[union-attr]  # one of them matched
+            current_lines = [line[start:]]
         else:
             if current_id is None:
                 current_id = f"line {lineno}"
             current_lines.append(line)
     if current_lines:
-        blocks.append((current_id, current_lines))
+        blocks.append((current_id or "line 1", current_lines))
 
     for cid, lines in blocks:
         body = " ".join(lines)
@@ -422,7 +424,7 @@ def merge_llm_rules(pol: Policy, text: str, llm_rules: list[dict]) -> Policy:
         if why:
             pol.notes.append(f"Dropped LLM rule {why}: {kind} {target}".rstrip())
             continue
-        r = Rule(kind, target, str(d.get("clause_id", "llm") or "llm"), quote, "llm")
+        r = Rule(str(kind), target, str(d.get("clause_id", "llm") or "llm"), quote, "llm")
         if r.key() not in have:
             have.add(r.key())
             pol.rules.append(r)

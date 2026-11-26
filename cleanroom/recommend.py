@@ -44,7 +44,7 @@ def recommend(cands: list[Candidate], seed_sd_limit: float = 0.02) -> dict:
     caution = []
     if eligible and eligible[0].seed_sd is not None and eligible[0].seed_sd > seed_sd_limit:
         caution.append(f"{eligible[0].name}'s score moves by more than {seed_sd_limit} across seeds")
-    best_lb = max((c for c in cands if c.leaderboard is not None), key=lambda c: c.leaderboard, default=None)
+    best_lb = max((c for c in cands if c.leaderboard is not None), key=lambda c: c.leaderboard or 0.0, default=None)
     pick = eligible[0].name if eligible else None
     if best_lb and pick and best_lb.name != pick:
         caution.append(f"{best_lb.name} has the top leaderboard score but is not eligible: "

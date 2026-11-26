@@ -50,7 +50,7 @@ def _rows(path: Path, id_col: str, col: str, what: str) -> dict[str, str]:
             i = (row.get(id_col) or "").strip()
             if i in out:
                 dup.append(i)
-            out[i] = row.get(col)
+            out[i] = row.get(col) or ""
     if dup:
         raise ScoringError(f"{what} has duplicate ids, e.g. {', '.join(dup[:3])}")
     return out

@@ -29,6 +29,7 @@ import subprocess
 import sys
 import tarfile
 import time
+from typing import Any
 from pathlib import Path
 
 from .._runner.runner import egress_blocked
@@ -80,21 +81,21 @@ class LocalBackend(Backend):
         self.ckdir = self.root / "checkpoints"
         self.ckdir.mkdir(exist_ok=True)
         self.user = candidate_user if candidate_user is not None else os.environ.get("CLEANROOM_CANDIDATE_USER")
-        self._caps = None
+        self._caps: dict | None = None
 
     # ------------------------------------------------------------------
     def doctor(self) -> dict:
         if self._caps is None:
             strace = shutil.which("strace")
-            caps = {
+            caps: dict[str, Any] = {
                 "strace_installed": bool(strace),
-                "strace_works": bool(strace) and _probe([strace, "-f", "-qq", "-o", os.devnull, "true"]),
+                "strace_works": strace is not None and _probe([strace, "-f", "-qq", "-o", os.devnull, "true"]),
                 "unshare_net": bool(shutil.which("unshare")) and _probe(["unshare", "-rn", "true"]),
                 "audit_hook": True,
                 "separate_uid": False,
             }
             caps["strace_in_netns"] = (caps["strace_works"] and caps["unshare_net"]
-                                       and _probe(["unshare", "-rn", strace, "-f", "-qq", "-o", os.devnull, "true"]))
+                                       and _probe(["unshare", "-rn", str(strace), "-f", "-qq", "-o", os.devnull, "true"]))
             caps["egress_probe_refused"] = caps["unshare_net"] and _probe(
                 ["unshare", "-rn", sys.executable, "-c", EGRESS_PROBE], want_ok=False)
             if self.user:
@@ -112,13 +113,14 @@ class LocalBackend(Backend):
                          f"(rules allow: {', '.join(allow)}). Use the Sprite backend for an allowlist.")
         self.fingerprint = _fingerprint()
         self.site_dir = None
-        if caps["separate_uid"] and _user_site():
+        site = _user_site()
+        if caps["separate_uid"] and site:
             # the candidate cannot read this user's home: give it a root-owned read-only copy
             dst = f"/var/tmp/cleanroom-{os.getuid()}/site"
             subprocess.run(["sudo", "-n", "sh", "-c",
                             'mkdir -p "$1" && chmod 0711 "$(dirname "$1")" && rm -rf "$1.new" && '
                             'cp -a "$2/." "$1.new" && chown -R root:root "$1.new" && chmod -R a+rX,go-w "$1.new" '
-                            '&& rm -rf "$1" && mv "$1.new" "$1"', "sh", dst, _user_site()],
+                            '&& rm -rf "$1" && mv "$1.new" "$1"', "sh", dst, site],
                            check=False, capture_output=True, timeout=600)
             if os.path.isdir(dst):
                 self.site_dir = dst

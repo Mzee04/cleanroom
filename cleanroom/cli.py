@@ -16,6 +16,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 from . import __version__
 
@@ -29,7 +30,7 @@ def _project(args):
     private = list(cfg.get("private", []))
     if cfg.get("holdout") and cfg["holdout"].get("truth"):
         private.append(cfg["holdout"]["truth"])   # the holdout truth never goes where candidates run
-    kw = {"private": private}
+    kw: dict[str, Any] = {"private": private}
     if args.backend == "sprite":
         kw.update(worker=args.worker, setup=cfg.get("worker_setup"))
     return Project(root, get_backend(args.backend, root, **kw), use_llm=not args.no_llm)

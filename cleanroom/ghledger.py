@@ -279,10 +279,10 @@ def publish(summary: dict, outbox: Path, really: bool = False, ledger=None, gith
                 if not r["valid"]:       # a forged or damaged marker is never trusted as the chain head
                     continue
                 if r["session"] == session:
-                    ex = existing.setdefault(r["candidate"], {"number": i["number"], "url": i.get("html_url", ""),
-                                                              "records": []})
-                    if ex["number"] == i["number"]:
-                        ex["records"].append(r)
+                    slot = existing.setdefault(r["candidate"], {"number": i["number"], "url": i.get("html_url", ""),
+                                                                "records": []})
+                    if slot["number"] == i["number"]:
+                        slot["records"].append(r)
                 if r["seq"] > gh_seq:
                     gh_seq, gh_head = r["seq"], r["record"]
         if gh_seq:      # GitHub is the source of truth for the head once it has records
@@ -290,9 +290,9 @@ def publish(summary: dict, outbox: Path, really: bool = False, ledger=None, gith
     done = []
     prev = head
     for c in summary["candidates"]:
-        ex = existing.get(c["name"])
+        ex: dict | None = existing.get(c["name"])
         latest = max(ex["records"], key=lambda r: r["seq"]) if ex and ex["records"] else None
-        if latest:
+        if ex and latest:
             same = {k: v for k, v in latest["data"].items() if k not in ("previous_issue_sha256", "supersedes")}
             fresh = record_for(c, summary, latest["prev"])
             if same == {k: v for k, v in fresh.items() if k != "previous_issue_sha256"}:

@@ -34,6 +34,7 @@ import sys
 import tarfile
 import threading
 import time
+from typing import Any
 
 MAX_OUTPUT_FILE = 512 << 20      # copied candidate output files
 MAX_LOG = 8 << 20                # stdout / stderr kept per run
@@ -350,7 +351,9 @@ def _kill_user(uid: int) -> int:
 
 def scan_aliases(dirs: list[str]) -> dict:
     """Every symlink (with its real target) and every multiply-linked file under ``dirs``."""
-    links, groups, seen = [], {}, 0
+    links: list[dict] = []
+    groups: dict = {}
+    seen = 0
     for top in dirs:
         if not os.path.isdir(top):
             continue
@@ -449,11 +452,12 @@ def _run(spec: dict, token: str) -> dict:
     if user and not root:
         raise SystemExit("runner: a separate candidate uid needs root")
     pw = pwd.getpwnam(user) if user else None
+    uid, gid = (pw.pw_uid, pw.pw_gid) if pw else (-1, -1)
     os.umask(0o077)
     if os.path.lexists(tdir):
         shutil.rmtree(tdir)
     os.makedirs(os.path.join(tdir, "outputs"), mode=0o700)
-    meta = {"token": token, "candidate_uid": "separate" if user else "same", "user": user,
+    meta: dict[str, Any] = {"token": token, "candidate_uid": "separate" if user else "same", "user": user,
             "runner_uid": os.geteuid(), "trace_paths": [tdir], "notes": []}
 
     outs = [_safe_rel(o) for o in spec.get("outputs", [])]
@@ -468,8 +472,8 @@ def _run(spec: dict, token: str) -> dict:
     if user:
         if home:
             os.makedirs(home, exist_ok=True)
-            _chown_tree(home, pw.pw_uid, pw.pw_gid)
-        _chown_tree(work, pw.pw_uid, pw.pw_gid)
+            _chown_tree(home, uid, gid)
+        _chown_tree(work, uid, gid)
 
     collector = None
     if user:
@@ -500,7 +504,7 @@ def _run(spec: dict, token: str) -> dict:
     # processes in that namespace, while the candidate stays an ordinary, different uid that cannot
     # signal or trace strace.
     userns = bool(user and spec.get("ptrace_userns"))
-    use_strace = bool(strace) and _strace_ok(strace, user, userns)
+    use_strace = strace is not None and _strace_ok(strace, user, userns)
     if strace and not use_strace:
         meta["notes"].append("strace was not usable for this run (ptrace refused); audit hook only")
 
@@ -531,8 +535,8 @@ def _run(spec: dict, token: str) -> dict:
 
     def demote():
         os.setgroups([])
-        os.setgid(pw.pw_gid)
-        os.setuid(pw.pw_uid)
+        os.setgid(gid)
+        os.setuid(uid)
 
     # paths the candidate must not see at all (on a Sprite: /.sprite, whose API socket can start
     # services and restore checkpoints); hidden in a private mount namespace
@@ -583,7 +587,7 @@ def _run(spec: dict, token: str) -> dict:
         cmd = netns + cmd
 
     if spec.get("egress_probe"):
-        meta["egress_probe"] = _egress_probe(env, netns, (pw.pw_uid, pw.pw_gid) if user else None)
+        meta["egress_probe"] = _egress_probe(env, netns, (uid, gid) if user else None)
 
     so = open(os.path.join(tdir, "stdout.txt"), "wb")
     se = open(os.path.join(tdir, "stderr.txt"), "wb")
@@ -592,12 +596,12 @@ def _run(spec: dict, token: str) -> dict:
     timed_out = False
     untraced: dict = {}
     if user:
-        _kill_user(pw.pw_uid)      # nothing of the candidate uid may predate the run
+        _kill_user(uid)      # nothing of the candidate uid may predate the run
     try:
         p = subprocess.Popen(cmd, cwd=work, env=env, stdout=so, stderr=se, stdin=subprocess.DEVNULL,
                              start_new_session=True, preexec_fn=preexec)
         rc, timed_out, leftovers = _wait(p, t0 + timeout, use_strace,
-                                         watch_uid=pw.pw_uid if (user and use_strace) else None,
+                                         watch_uid=uid if (user and use_strace) else None,
                                          untraced=untraced)
         meta["leftover_tracees"] = leftovers
     except OSError as e:
@@ -612,7 +616,7 @@ def _run(spec: dict, token: str) -> dict:
         meta["strace_signalled"] = rc < 0
     # nothing the candidate started survives into the bundle step
     if user:
-        meta["killed_leftovers"] = _kill_user(pw.pw_uid)
+        meta["killed_leftovers"] = _kill_user(uid)
     else:
         try:
             os.killpg(p.pid, signal.SIGKILL)

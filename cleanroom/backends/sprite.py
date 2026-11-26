@@ -273,8 +273,8 @@ class SpriteBackend(Backend):
         self.worker = worker or os.environ.get("CLEANROOM_WORKER", "cleanroom-worker")
         self._api = api          # created on first use: `report` never needs the Sprites token
         self.setup_cmds = setup or []
-        self._caps = None
-        self._policy_evidence = {}
+        self._caps: dict | None = None
+        self._policy_evidence: dict = {}
 
     @property
     def api(self) -> SpritesAPI:

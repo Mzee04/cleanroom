@@ -45,6 +45,8 @@ def build_summary(ledger: Ledger, policy, env: dict | None = None, honest: bool 
     issues = ledger.get_meta("github_issues") or {}
     for name in ledger.candidates():
         run = ledger.latest(name, "run")
+        if run is None:
+            continue
         ver = ledger.latest_for(name, "verify", run)
         inv = ledger.latest_for(name, "investigate", run)
         seeds = ledger.get_meta(f"seeds:{name}")

@@ -22,9 +22,11 @@ jobs:
       - name: Install strace
         run: sudo apt-get update -qq && sudo apt-get install -y -qq strace
       - name: Install
-        run: python -m pip install -e '.[dev]' ruff
+        run: python -m pip install -e '.[dev]' ruff mypy
       - name: Lint
         run: ruff check cleanroom tests deploy demo
+      - name: Type check
+        run: mypy --ignore-missing-imports --check-untyped-defs cleanroom
       - name: Build the demo data
         run: cd demo && python make_data.py
       - name: Candidate user for the separate-uid runner tests

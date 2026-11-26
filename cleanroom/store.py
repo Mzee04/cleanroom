@@ -70,7 +70,7 @@ class Ledger:
             (candidate, kind, time.time(), backend, json.dumps(cmd), result.checkpoint, result.exit_code,
              result.output_sha256, result.tracer, result.network, result.trace_dir, result.workdir,
              json.dumps(data), self.session))
-        rid = cur.lastrowid
+        rid = int(cur.lastrowid or 0)
         for f in findings:
             d = f.to_dict() if hasattr(f, "to_dict") else f
             self.db.execute("INSERT INTO findings VALUES (?,?,?,?,?,?,?,?)",

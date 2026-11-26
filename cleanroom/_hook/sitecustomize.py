@@ -19,6 +19,7 @@ _log = os.environ.get("CLEANROOM_AUDIT_LOG")
 if _log:
     import json as _json
 
+    _fd: int | None
     try:
         _fd = os.open(_log, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
     except OSError:

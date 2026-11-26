@@ -196,7 +196,7 @@ class Project:
         output can a change with the file hidden be attributed to the file.
         """
         orig = self.ledger.latest(name, "run")
-        out = []
+        out: list[dict] = []
         if not orig:
             return out
         self._check_policy(orig)
@@ -268,6 +268,8 @@ class Project:
 
     def seeds(self, name: str) -> dict:
         orig = self.ledger.latest(name, "run")
+        if orig is None:
+            raise ValueError(f"no run recorded for {name}")
         scores, shas = [], []
         for s in self.cfg.get("seeds", [1, 2, 3]):
             res, _ = self._attempt(name, f"seed{s}", orig["checkpoint"],

@@ -25,6 +25,7 @@ import ipaddress
 import json
 import os
 import re
+from typing import Any
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -236,7 +237,7 @@ def _fdpath(raw: str) -> str:
     return _s(raw)
 
 
-def _args(line: str) -> list[tuple[str, str]]:
+def _args(line: str) -> list[tuple[str, str, str]]:
     """Positional args of a syscall line: ('str', value) or ('fd', 'AT_FDCWD'/'N', path-or-'')."""
     body = line.split("(", 1)[1] if "(" in line else ""
     res = RESULT.search(body)
@@ -283,7 +284,7 @@ def parse_strace_file(path: Path, display_name: str | None = None, state: dict |
     m = re.search(r"\.(\d+)$", path.name)
     if m:
         pid = int(m.group(1))
-    st = state if state is not None else {}
+    st: dict[str, Any] = state if state is not None else {}
     st.setdefault("cwd", None)          # last absolute cwd seen (chdir / AT_FDCWD decoration); None = start cwd
     st.setdefault("cwd_changed", False)
     st.setdefault("exited", False)
@@ -332,7 +333,7 @@ def parse_strace_line(line: str, pid: int | None = None, state: dict | None = No
                 if target.startswith("/"):
                     st["cwd"] = os.path.normpath(target)
                 elif st.get("cwd"):
-                    st["cwd"] = os.path.normpath(os.path.join(st["cwd"], target))
+                    st["cwd"] = os.path.normpath(os.path.join(str(st["cwd"]), target))
                 else:
                     st["cwd"] = None
             else:
