@@ -62,16 +62,24 @@ LIMITS = [
     "or tampered trace is INCONCLUSIVE and never PASS.",
     "A SHA-256 match proves the output reproduced in the recorded environment (checkpoint, library versions, "
     "hardware), only. Other hardware, library versions or thread counts can change results.",
-    "Egress is denied for every run; a finding says egress was blocked only when that was verified by a probe "
-    "during the run. Locally that is an empty network namespace; on a Sprite it is the DNS-based network policy "
-    "set from outside the worker.",
+    "Egress is denied for every run; a finding says egress was blocked only when probes found it blocked: "
+    "as the candidate's uid just before the run (DNS plus a few TCP and UDP destinations) and by DNS after it. "
+    "That checks a handful of destinations, not every address. Locally the denial is an empty network "
+    "namespace; on a Sprite it is the network policy set from outside the worker.",
+    "On the worker the Sprite's internal API socket is hidden from candidates, untraced child processes are "
+    "refused by a seccomp filter (and any found anyway make the run INCONCLUSIVE), and candidates run under "
+    "process, file-size and open-file limits. Writes on an already connected UDP socket and loopback "
+    "connects are not traced.",
+    "Leakage that never opens a forbidden file is out of reach: labels rebuilt from public data (the demo uses "
+    "scikit-learn's public diabetes set), answers typed into the code, or a model trained elsewhere.",
     "The holdout score and its interval come from your own local split, scored by the agent; the truth file "
     "never reaches the worker. The top pick's interval is optimistic because it was chosen as the maximum; the "
     "paired comparison is the fairer test. Seed spread only means something if the code reads CLEANROOM_SEED.",
     "Investigations are one-factor re-runs: the run is repeated unchanged first, and a change is attributed to "
     "the hidden file only if the unchanged re-run reproduced the original output.",
     "The GitHub ledger is a hash chain of records (tamper-evident): an edited record no longer matches its hash "
-    "or the next record's link. It is not signed or externally timestamped.",
+    "or the next record's link, and `cleanroom verify-chain` checks every link. Records are never rewritten; a "
+    "changed result is appended as a revision. It is not signed or externally timestamped.",
     "Rules-to-policy extraction is heuristic (plus an optional LLM pass whose quotes must match the rules "
     "verbatim and name their target). Restrictive clauses it could not map are listed. Always read the policy "
     "table and the original rules.",
@@ -109,7 +117,8 @@ def render_html(s: dict) -> str:
             f'<td class="num">{_fmt(c["leaderboard"])}</td>'
             f'<td class="num">{_fmt(c["holdout"])}'
             + (f'<div class="meta">95% CI {ci[0]:.3f}–{ci[1]:.3f}</div>' if ci else "")
-            + (f'<div class="meta">seed sd {seeds["sd"]:.4f}</div>' if seeds else "")
+            + (f'<div class="meta">seed sd {seeds["sd"]:.4f}</div>' if seeds and seeds.get("sd") is not None
+               else '<div class="meta">seed sd n/a (fewer than 2 seed runs scored)</div>' if seeds else "")
             + f'</td><td>{_access(c, "forbidden")}</td><td>{_access(c, "network")}</td>'
             f'<td>{_repro(c)}</td><td><span class="pill {c["status"]}">{c["status"]}</span>'
             + (f'<div class="meta"><a href="{E(c["ledger_issue"])}">ledger #{E(c["ledger_issue"].rsplit("/", 1)[-1])}</a></div>'

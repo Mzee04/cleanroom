@@ -7,7 +7,7 @@
   5. investigate every red flag (re-run with the forbidden file hidden, etc.)
   6. verify reproduction: restore the checkpoint, re-run, compare SHA-256
   7. optional honest score: bootstrap CI on your holdout + seed spread
-  8. recommend, explain, write the report, optionally log to GitHub
+  then (unnumbered in the log): recommend, explain, write the report, optionally log to GitHub
 """
 from __future__ import annotations
 
@@ -19,7 +19,8 @@ from .ghledger import publish
 from .report import write_report
 from .summary import build_summary, validate_verdict
 
-C = {"FAIL": "\033[31m", "INCONCLUSIVE": "\033[35m", "WARN": "\033[33m", "PASS": "\033[32m", "INFO": "\033[36m", "B": "\033[1m", "0": "\033[0m"}
+C = {"FAIL": "\033[31m", "INCONCLUSIVE": "\033[35m", "WARN": "\033[33m", "PASS": "\033[32m", "INFO": "\033[36m",
+     "B": "\033[1m", "0": "\033[0m"}
 
 
 def _c(tag, s, color=True):
@@ -82,9 +83,12 @@ def run_agent(proj: Project, honest: bool = True, publish_github: bool = False, 
     if not flagged:
         log("  nothing to investigate")
     for n in flagged:
-        for r in proj.investigate(n):
-            v = r.get("verdict") or r["data"].get("verdict")
-            log(f"  {n}: {v}")
+        try:
+            for r in proj.investigate(n):
+                v = r.get("verdict") or r["data"].get("verdict")
+                log(f"  {n}: {v}")
+        except Exception as e:  # noqa: BLE001 - one candidate's failure must not stop the others
+            log(f"  {n}: investigation could not complete ({type(e).__name__}: {str(e)[:200]})")
 
     # 6. verify
     log(_c("B", "\n[6/7] Verifying reproduction from the checkpoint", color))
@@ -92,7 +96,11 @@ def run_agent(proj: Project, honest: bool = True, publish_github: bool = False, 
         if n in flagged:
             log(f"  {n}: skipped (already ineligible)")
             continue
-        rec = proj.verify(n)
+        try:
+            rec = proj.verify(n)
+        except Exception as e:  # noqa: BLE001 - recorded as "reproduction not checked"
+            log(f"  {n}: verification could not complete ({type(e).__name__}: {str(e)[:200]})")
+            continue
         f = [x for x in rec["findings"] if x.code in ("reproduced", "not_reproduced")][0]
         log(f"  {n}: " + _c(f.severity, "MATCH" if rec["reproduced"] else "MISMATCH", color) + f" · {f.detail}")
 
@@ -103,7 +111,11 @@ def run_agent(proj: Project, honest: bool = True, publish_github: bool = False, 
             ver = proj.ledger.latest(n, "verify")
             if n in flagged or not ver or not any(f["code"] == "reproduced" for f in ver["findings"]):
                 continue
-            sp = proj.seeds(n)
+            try:
+                sp = proj.seeds(n)
+            except Exception as e:  # noqa: BLE001
+                log(f"  {n}: seed runs could not complete ({type(e).__name__}: {str(e)[:200]})")
+                continue
             if sp:
                 sd = "n/a" if sp.get("sd") is None else f"{sp['sd']:.4f}"
                 log(f"  {n}: seeds {cfg['seeds']} → AUC {', '.join(f'{x:.4f}' for x in sp['scores'])} "

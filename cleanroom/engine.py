@@ -14,14 +14,14 @@ from pathlib import Path
 
 from . import checks
 from .backends import Backend, RunSpec
-from .backends.base import state_root
+from .backends.base import RunResult, state_root
 from .config import load_config
 from .policy import Policy, build_policy
 from .scoring import ScoringError, read_ids, read_predictions, score_file
 from .store import Ledger
 from .trace import load_trace
 
-FORBID_TITLE = re.compile(r"^Read forbidden file (\S+)")
+FORBID_TITLE = re.compile(r"^Read forbidden file (.+?)(?: \(via .*\))?$")
 
 
 class Project:
@@ -152,12 +152,27 @@ class Project:
         if orig["data"].get("policy_sha256") != self.policy.digest():
             raise SystemExit(f"{orig['candidate']}'s run was checked against a different policy; run it again")
 
+    def _attempt(self, name: str, kind: str, checkpoint: str, spec: RunSpec, hide: tuple = ()):
+        """Run on the backend; an infrastructure failure becomes an INCONCLUSIVE run, never a crash
+        of the whole loop (one bad candidate must not take the others with it)."""
+        td = self.trace_dir(name, kind)
+        try:
+            return self.backend.run_from_checkpoint(checkpoint, spec, td, hide=hide), []
+        except Exception as e:  # noqa: BLE001 - any backend error is reported, not raised
+            Path(td).mkdir(parents=True, exist_ok=True)
+            msg = f"{type(e).__name__}: {str(e)[:300]}"
+            self.log(f"  {name}: {kind} could not complete ({msg})")
+            res = RunResult(exit_code=-1, duration_s=0.0, workdir="", trace_dir=str(td), output_sha256=None,
+                            outputs={}, tracer="none", network="unknown", checkpoint=checkpoint, notes=[msg])
+            return res, [checks.Finding(checks.INCONCLUSIVE, "run_infrastructure_failed",
+                                        "The run could not be completed on the backend", msg)]
+
     # -- operations -------------------------------------------------------------
     def run(self, name: str, cmd: list[str], checkpoint: str | None = None, note: str = "") -> dict:
         cp = checkpoint or self.backend.checkpoint(f"before {name}")
-        res = self.backend.run_from_checkpoint(cp, self.spec(name, cmd), self.trace_dir(name, "run"))
+        res, extra = self._attempt(name, "run", cp, self.spec(name, cmd))
         res.checkpoint = cp
-        rec = self._record(name, "run", cmd, res, data={"note": note})
+        rec = self._record(name, "run", cmd, res, extra, data={"note": note})
         self.log(f"  {name}: exit {res.exit_code}, sha256 {str(res.output_sha256)[:12]}…, "
                  f"{checks.worst(rec['findings'])}")
         return rec
@@ -167,10 +182,9 @@ class Project:
         if not orig:
             raise SystemExit(f"no run recorded for {name}; use `cleanroom run --name {name} -- ...` first")
         self._check_policy(orig)
-        res = self.backend.run_from_checkpoint(orig["checkpoint"], self.spec(name, orig["cmd"]),
-                                               self.trace_dir(name, "verify"))
+        res, extra = self._attempt(name, "verify", orig["checkpoint"], self.spec(name, orig["cmd"]))
         f = checks.check_reproduction(orig["sha256"], res.output_sha256, orig["checkpoint"], self.policy)
-        rec = self._record(name, "verify", orig["cmd"], res, [f], data=self._bind(orig))
+        rec = self._record(name, "verify", orig["cmd"], res, [f, *extra], data=self._bind(orig))
         rec["reproduced"] = f.severity == checks.PASS
         return rec
 
@@ -194,12 +208,11 @@ class Project:
         investigated = [f["title"] for f in forb if FORBID_TITLE.match(f["title"])] + [f["title"] for f in net]
         remaining = [f["title"] for f in flags if f["title"] not in investigated]
         if hidden:
-            base = self.backend.run_from_checkpoint(orig["checkpoint"], self.spec(name, orig["cmd"]),
-                                                    self.trace_dir(name, "baseline"))
+            base, _ = self._attempt(name, "baseline", orig["checkpoint"], self.spec(name, orig["cmd"]))
             deterministic = base.exit_code == 0 and base.output_sha256 == orig["sha256"]
             self._record(name, "investigate-baseline", orig["cmd"], base, data=self._bind(orig))
-            res = self.backend.run_from_checkpoint(orig["checkpoint"], self.spec(name, orig["cmd"]),
-                                                   self.trace_dir(name, "investigate"), hide=tuple(hidden))
+            res, _ = self._attempt(name, "investigate", orig["checkpoint"], self.spec(name, orig["cmd"]),
+                                   hide=tuple(hidden))
             data, _ = self._scores(res.outputs)
             before = {"leaderboard": orig["data"].get("leaderboard"),
                       "holdout": (orig["data"].get("holdout") or {}).get("auc")}
@@ -208,7 +221,11 @@ class Project:
             files = ", ".join(hidden)
             lb_move = (f" and the leaderboard score moves from {_f(before['leaderboard'])} to "
                        f"{_f(after['leaderboard'])}" if before["leaderboard"] is not None else "")
-            if not deterministic:
+            if base.exit_code == -1 or res.exit_code == -1:
+                verdict = ("One-factor re-run could not be completed on the backend, so whether the score "
+                           f"depends on {files} is unknown. Reading it is still a rules breach as written.")
+                sev = checks.WARN
+            elif not deterministic:
                 verdict = (f"One-factor re-run inconclusive: re-running unchanged from the same checkpoint did "
                            f"not reproduce the original output, so a change without {files} cannot be "
                            "attributed to the file. Reading it is still a rules breach as written.")
@@ -253,9 +270,8 @@ class Project:
         orig = self.ledger.latest(name, "run")
         scores, shas = [], []
         for s in self.cfg.get("seeds", [1, 2, 3]):
-            res = self.backend.run_from_checkpoint(orig["checkpoint"],
-                                                   self.spec(name, orig["cmd"], env={"CLEANROOM_SEED": str(s)}),
-                                                   self.trace_dir(name, f"seed{s}"))
+            res, _ = self._attempt(name, f"seed{s}", orig["checkpoint"],
+                                   self.spec(name, orig["cmd"], env={"CLEANROOM_SEED": str(s)}))
             data, _ = self._scores(res.outputs)
             auc = (data.get("holdout") or {}).get("auc")
             if auc is not None and res.exit_code == 0:

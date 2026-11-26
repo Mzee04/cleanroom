@@ -149,7 +149,9 @@ def main():
     # 4. the report service on port 8080 (the Sprite's public URL port)
     svc = {"cmd": "bash", "args": ["-lc", f"cd {REMOTE}/demo && python3 -m cleanroom --backend sprite report --serve "
                                           "--host 0.0.0.0 --port 8080"],
-           "http_port": 8080, "needs": [], "dir": f"{REMOTE}/demo", "env": env}
+           "http_port": 8080, "needs": [], "dir": f"{REMOTE}/demo",
+           # the public report service only reads the local ledger: it never gets the Sprites token
+           "env": {k: v for k, v in env.items() if k != "SPRITES_TOKEN_FILE"}}
     api.request("PUT", f"/v1/sprites/{args.agent}/services/cleanroom-report", body=svc)
     try:  # pick up the freshly uploaded code
         api._ndjson("POST", f"/v1/sprites/{args.agent}/services/cleanroom-report/restart")  # noqa: SLF001

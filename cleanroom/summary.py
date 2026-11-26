@@ -15,6 +15,12 @@ from .scoring import bootstrap_ci, paired_bootstrap_diff
 from .store import Ledger
 
 
+# WARN findings that make a candidate ineligible: each one means the forbidden-file check could have
+# missed something (a new name for the file, an unplaceable open, io_uring) or the code tried to read it
+BLOCKING_WARN = {"forbidden_file_attempt", "forbidden_file_alias", "forbidden_file_unresolved", "untraced_io"}
+FILE_FLAGS = BLOCKING_WARN | {"forbidden_file_read", "unresolved_paths", "untraced_process"}
+
+
 def _bound_meta(m, run) -> bool:
     return bool(m) and m.get("run_id") == run["id"] and m.get("checkpoint") == run["checkpoint"] \
         and m.get("policy_sha256") == run["data"].get("policy_sha256")
@@ -48,6 +54,10 @@ def build_summary(ledger: Ledger, policy, env: dict | None = None, honest: bool 
         findings = list(run["findings"])
         if ver:
             findings += [f for f in ver["findings"] if f["code"] in ("reproduced", "not_reproduced")]
+            # the re-run is evidence too: a FAIL or INCONCLUSIVE there counts against the candidate
+            findings += [{**f, "title": "On the verification re-run: " + f["title"]} for f in ver["findings"]
+                         if f["severity"] in ("FAIL", "INCONCLUSIVE")
+                         and f["code"] not in ("reproduced", "not_reproduced")]
         if inv:
             findings += [f for f in inv["findings"] if f["code"] == "investigation"]
         reproduced = None
@@ -63,6 +73,7 @@ def build_summary(ledger: Ledger, policy, env: dict | None = None, honest: bool 
             fails = ["investigation"]
         inconc = [f["title"] for f in findings if f["severity"] == "INCONCLUSIVE"]
         warns = [f["title"] for f in findings if f["severity"] == "WARN"]
+        blocking = [f["title"] for f in findings if f["severity"] == "WARN" and f["code"] in BLOCKING_WARN]
         clean = [_clean_finding(f) for f in findings]
         c = {
             "name": name, "note": run["data"].get("note", ""), "cmd": redact_cmd(run["cmd"]),
@@ -88,8 +99,9 @@ def build_summary(ledger: Ledger, policy, env: dict | None = None, honest: bool 
             "_ids": ho.get("ids"), "_y": ho.get("y"), "_s": ho.get("s"),
         }
         cands.append(c)
-        rec_inputs.append(Candidate(name, c["fails"], warns, reproduced, ho.get("auc"), c["leaderboard"],
-                                    seeds.get("sd") if seeds else None, inconclusive=c["inconclusive"]))
+        rec_inputs.append(Candidate(name, c["fails"] + [redact_text(x) for x in blocking], warns, reproduced,
+                                    ho.get("auc"), c["leaderboard"], seeds.get("sd") if seeds else None,
+                                    inconclusive=c["inconclusive"]))
     rec = recommend(rec_inputs)
     by = {c["name"]: c for c in cands}
     pick = rec["recommended"]
@@ -140,7 +152,8 @@ def validate_verdict(text: str, s: dict) -> bool:
     said = {x for x in said if x in names}
     if rec is None:
         return not said
-    return rec in text and said <= {rec} and re.search(r"\bguarantee|\bclean\b", text, re.I) is None
+    return (re.search(rf"\b{re.escape(rec)}\b", text) is not None and said <= {rec}
+            and re.search(r"\bguarantee|\bclean\b", text, re.I) is None)
 
 
 def deterministic_verdict(s: dict) -> str:
@@ -152,8 +165,20 @@ def deterministic_verdict(s: dict) -> str:
     r = by[rec["recommended"]]
     parts = [f"Submit {r['name']}."]
     traced = "its trace" if "strace" in (r["tracer"] or "") else "its audit-hook-only trace (WARN-level evidence)"
-    why = [f"No forbidden access detected in {traced}", "no network attempts" if not any(
-        f["code"].startswith("network") for f in r["findings"]) else "only allowed hosts contacted"]
+    file_flags = [f for f in r["findings"] if f["code"] in FILE_FLAGS and f["severity"] in ("FAIL", "WARN")]
+    if file_flags:
+        files_txt = f"The forbidden-file check in {traced} is not clean: {file_flags[0]['title']}"
+    else:
+        files_txt = f"No forbidden access detected in {traced}"
+    net = [f for f in r["findings"] if f["code"].startswith("network") and f["severity"] in ("FAIL", "WARN")]
+    allowed = [f for f in r["findings"] if f["code"] == "allowed_host"]
+    if net:
+        net_txt = f"network flagged: {net[0]['title']}"
+    elif allowed:
+        net_txt = "only allowed hosts contacted"
+    else:
+        net_txt = "no network attempts"
+    why = [files_txt, net_txt]
     if r["reproduced"]:
         why.append(f"its output reproduced from checkpoint {r['checkpoint']} (SHA-256 match: reproduced in the "
                    "recorded environment)")

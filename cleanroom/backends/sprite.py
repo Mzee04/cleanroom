@@ -283,8 +283,11 @@ class SpriteBackend(Backend):
         return self._api
 
     def describe(self):
-        return {"backend": self.name, "worker": self.worker, "api": self.api.base.split("/v1/")[0]
-                if not self.api.via_gateway else "Sprites connector gateway"}
+        # from the configuration only, so describing the backend never needs the token
+        base = (self._api.base if self._api is not None
+                else (os.environ.get("CLEANROOM_SPRITES_API") or DEFAULT_API).rstrip("/"))
+        return {"backend": self.name, "worker": self.worker,
+                "api": "Sprites connector gateway" if "/v1/gateway/" in base else base.split("/v1/")[0]}
 
     # -- helpers -----------------------------------------------------------
     def _sh(self, script: str, timeout: int = 900) -> str:
