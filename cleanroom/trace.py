@@ -198,6 +198,12 @@ def pretty_line(line: str) -> str:
     return QSTR.sub(rep, line)
 
 
+def _local_dns(addr: str, port) -> bool:
+    """A loopback address on port 53: a local resolver (stub or the Sprite's DNS proxy) that sends the
+    query on. Kept as a network attempt; other loopback connects stay local and are skipped."""
+    return port == 53 and _is_loopback(addr)
+
+
 def _is_loopback(addr: str) -> bool:
     try:
         ip = ipaddress.ip_address(addr)
@@ -377,7 +383,7 @@ def parse_strace_line(line: str, pid: int | None = None, state: dict | None = No
             return None
         sa = _sockaddr("{sa_family=" + fam + rest + "}")
         addr, port = (sa[1], sa[2]) if sa else ("", None)
-        if _is_loopback(addr):
+        if _is_loopback(addr) and not _local_dns(addr, port):
             return None
         # EINPROGRESS is a non-blocking connect that is still under way
         ok2 = ok or err == "EINPROGRESS"
@@ -392,7 +398,7 @@ def parse_strace_line(line: str, pid: int | None = None, state: dict | None = No
             if q:
                 return Event("dns", "strace", pid, host=q, port=53, ok=ok, errno=err, line=pretty, op=sm.group(1))
         sa = _sockaddr(line)          # sendto/sendmsg with an explicit destination (UDP and friends)
-        if sa and sa[1] and not _is_loopback(sa[1]):
+        if sa and sa[1] and (not _is_loopback(sa[1]) or _local_dns(sa[1], sa[2])):
             return Event("connect", "strace", pid, addr=sa[1], port=sa[2], ok=ok, errno=err, line=pretty,
                          op=sm.group(1), proto="udp")
         return None
@@ -519,9 +525,9 @@ def _audit_events(rec: dict) -> list[Event]:
             a = str(addr[0])
             if a.startswith("/") or a.startswith("@"):
                 return [Event("unix", "audit", pid, path=a, op=kind)]
-            if _is_loopback(a):
-                return []
             port = _int(addr[1] if len(addr) > 1 else None)
+            if _is_loopback(a) and not _local_dns(a, port):
+                return []
             try:
                 ipaddress.ip_address(a)
                 return [Event("connect", "audit", pid, addr=a, port=port, op=kind)]

@@ -113,7 +113,12 @@ What it does not cover:
   better guide. Ranking is by holdout score; seed spread is only a tie-break between equal holdout
   scores (an unmeasured spread loses that tie-break), and a large spread on the pick adds a caution.
 - **Rules-to-policy is heuristic.** Every rule keeps its clause id and verbatim quote; restrictive
-  clauses that map to no rule are listed as "unmapped" in the policy table. An optional LLM pass can
+  clauses that map to no rule are listed as "unmapped" in the policy table. A clause that makes the
+  allowed files the only ones ("All other files are off limits", "No other data may be used") becomes
+  a `forbid_unlisted_files` rule: reading a data file in the project that is not an allowed file, not
+  in `own_files`, not an output and not written by the run itself is then a forbidden read (FAIL, and
+  investigated like one). It judges data files inside the project folder only, not libraries or system
+  files, and stays unmapped when the rules name no allowed file. An optional LLM pass can
   add rules, but only when its quote appears verbatim in the rules text and names the rule's target.
   An LLM-written verdict is used only if it agrees with the deterministic recommendation. Always read
   the policy table.
@@ -166,9 +171,13 @@ What it does not cover:
   post-run scan reports symlinks and hard links that point at forbidden files.
 - Non-DNS UDP (`sendto` with an address) and IPv6 addresses count as network attempts. Connects to
   Unix sockets are recorded too.
-- Not traced: `write`/`send` on an already connected UDP socket, and connects to loopback addresses
-  are skipped. A DNS query sent with connect+write to a local stub resolver is therefore invisible.
-  Egress is still denied, so this hides intent, not a download.
+- A connect (TCP or UDP) or explicit-address send to a loopback address on port 53 counts as a DNS
+  lookup through the local resolver (glibc and most DNS libraries connect a UDP socket to the stub
+  resolver, then write the query). Other loopback connects stay local and are skipped.
+- Not traced: `write`/`writev` themselves (tracing every write would bloat the trace with all file
+  output). On a connected UDP socket the connect already records the destination, so what is lost is
+  the payload: a lookup sent with connect+write shows as "host name not captured" instead of naming
+  the host (`send`, `sendto`, `sendmsg` and `sendmmsg` payloads are still decoded).
 - strace lines split by `<unfinished ...>` / `<... resumed>` are joined before parsing; a resumed half
   with no start counts as a parse gap.
 - `ptrace` needs permission. When strace cannot attach, the run says `tracer: audit` and is capped at

@@ -95,6 +95,26 @@ def test_network_attempt_flagged(tmp_path):
     assert f and f[0].severity == "FAIL" and "example.org" in f[0].title
 
 
+def test_udp_lookup_through_local_resolver_is_flagged(tmp_path):
+    proj = make_project(tmp_path)
+    (tmp_path / "udp.py").write_text(textwrap.dedent("""
+        import os, socket
+        q = bytes.fromhex("123401000001000000000000076578616d706c65036f72670000010001")
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("127.0.0.53", 53))
+            os.write(s.fileno(), q)
+        except OSError:
+            pass
+        open("submission.csv", "w").write("id,pred\\n3,0.5\\n")
+    """))
+    rec = proj.run("U", [PY, "udp.py"])
+    f = [f for f in rec["findings"] if f.code == "network_connect"]
+    assert f and f[0].severity == "FAIL" and "local resolver" in f[0].title
+    if rec["result"].tracer == "strace":
+        assert any(e.startswith("strace") for e in f[0].evidence)
+
+
 def test_candidate_never_sees_tokens(tmp_path, monkeypatch):
     monkeypatch.setenv("SPRITES_TOKEN", "should-not-leak")
     proj = make_project(tmp_path)

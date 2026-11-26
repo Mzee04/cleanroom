@@ -46,6 +46,21 @@ def test_connect_inet_skip_loopback_and_record_unix():
     assert parse_strace_line(inprog).ok
 
 
+def test_udp_connect_to_a_local_resolver_is_kept():
+    # glibc and dnspython connect a UDP socket to the stub resolver and then write(); the write is not
+    # traced, so the connect is what records the lookup
+    stub = (f'connect(5<UDP:[77]>, {{sa_family=AF_INET, sin_port=htons(53), sin_addr=inet_addr("{hx("127.0.0.53")}")}}'
+            ", 16) = 0")
+    ev = parse_strace_line(stub)
+    assert ev.kind == "connect" and ev.addr == "127.0.0.53" and ev.port == 53 and ev.proto == "udp"
+    v6 = 'connect(5<UDP:[78]>, {sa_family=AF_INET6, sin6_port=htons(53), sin6_flowinfo=htonl(0), ' \
+         'inet_pton(AF_INET6, "::1", &sin6_addr), sin6_scope_id=0}, 28) = 0'
+    ev6 = parse_strace_line(v6)
+    assert ev6 is not None and ev6.port == 53
+    other = stub.replace("htons(53)", "htons(8125)")
+    assert parse_strace_line(other) is None       # other loopback traffic stays local
+
+
 def _dns_packet(name: str) -> bytes:
     q = b"".join(bytes([len(p)]) + p.encode() for p in name.split(".")) + b"\x00"
     return b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00" + q + b"\x00\x01\x00\x01"
