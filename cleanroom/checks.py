@@ -13,7 +13,7 @@ from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 
 from .policy import Policy, Rule
-from .trace import Trace, normalise_path
+from .trace import Trace, _is_loopback, normalise_path
 
 FAIL, INCONCLUSIVE, WARN, PASS, INFO = "FAIL", "INCONCLUSIVE", "WARN", "PASS", "INFO"
 SEVERITY_ORDER = [FAIL, INCONCLUSIVE, WARN, PASS, INFO]
@@ -87,6 +87,12 @@ def check_files(trace: Trace, policy: Policy, workdir: str, outputs: list[str],
     reads = [e for e in trace.events if e.kind == "open" and e.mode in ("read", "rw")]
     forbidden_hit = False
     allow = policy.of("allow_file")
+    only_listed = policy.unlisted_files_rule()
+    # files this run made itself (written, or the destination of a rename/link) are its own
+    made = {normalise_path(e.path, workdir) for e in trace.events
+            if e.kind == "open" and e.mode in ("write", "rw") and e.ok and e.path}
+    made |= {normalise_path(e.path2, workdir) for e in trace.events
+             if e.kind in ("alias", "modify") and e.ok and e.path2}
     unresolved = [e for e in reads if not e.resolved]
     reads = [e for e in reads if e.resolved]
     aliases = _alias_map(trace, workdir)
@@ -120,6 +126,17 @@ def check_files(trace: Trace, policy: Policy, workdir: str, outputs: list[str],
         if path in outputs or path in own_files or not ok_evs:
             continue
         if allow and not policy.allowed_file_rule(path):
+            if only_listed and path not in made and not any(policy.allowed_file_rule(o)
+                                                            for o in _origin(path, aliases)):
+                forbidden_hit = True
+                names = ", ".join(sorted({r.target for r in allow})[:6])
+                out.append(Finding.with_rule(
+                    FAIL, "forbidden_file_read", f"Read forbidden file {path}",
+                    f"The rules list the files that may be used ({names}) and put all other files off limits. "
+                    f"The run opened {path}, which it did not create, {len(ok_evs)} time(s). If it is your own "
+                    "file, add it to own_files in cleanroom.json.", only_listed,
+                    [e.evidence() for e in ok_evs]))
+                continue
             out.append(Finding(WARN, "unlisted_file_read", f"Read {path}, which the rules do not list",
                                "Not forbidden, but not among the files the rules say you may use. "
                                "Check it is your own file and not external data.",
@@ -212,7 +229,9 @@ def check_network(trace: Trace, policy: Policy, enforced: bool = True) -> list[F
         dns = addr.endswith(":53")
         sent = any(e.op in ("sendto", "sendmsg", "sendmmsg", "socket.sendto") for e in evs)
         verb = "Sent a datagram to" if sent else "Opened a connection to" if succeeded else "Tried to connect to"
-        title = "Tried a DNS lookup (host name not captured)" if dns else f"{verb} {addr}"
+        local = dns and any(_is_loopback(e.addr or "") for e in evs)
+        title = ("Tried a DNS lookup through the local resolver (host name not captured)" if local else
+                 "Tried a DNS lookup (host name not captured)" if dns else f"{verb} {addr}")
         if succeeded and not dns:
             detail = ("Connection succeeded: egress was NOT blocked for this address." if not sent else
                       "The send call succeeded locally; " + (blocked_txt if not enforced else

@@ -25,6 +25,7 @@ KINDS = (
     "forbid_external_data",
     "allow_external_data",
     "require_reproducible",  # seeds fixed / results must be reproducible
+    "forbid_unlisted_files",  # only the allow_file files may be read ("all other files are off limits")
 )
 
 NEG = re.compile(
@@ -94,6 +95,19 @@ WITHHELD_LABELS_RE = re.compile(
 )
 REPRO_RE = re.compile(r"\b(seeds?|reproduc\w*|deterministic|re-?run)\b", re.I)
 CLAUSE_ID_RE = re.compile(r"^\s*(?:(?:rule|section|§)\s*)?(\d+(?:\.\d+)*)[.):]?\s+", re.I)
+# "All other files are off limits", "no other data may be used", "only the files listed above may be
+# read": the allowed files are an exhaustive list. Only enforced when the rules name allowed files.
+ONLY_LISTED_RE = re.compile(
+    r"\b(?:all|any) other (?:files?|data(?:sets?)?|inputs?)\b[^.;]*?\b(?:off[- ]limits|forbidden|prohibited|"
+    r"banned|disallowed|not (?:be )?(?:permitted|allowed|used|read|accessed)|must not|may not|shall not|"
+    r"cannot|can't)\b"
+    r"|\b(?:must|may|shall|should|can) not (?:use|read|access|load|open) (?:any )?other (?:files?|data)\b"
+    r"|\bno other (?:files?|data(?:sets?)?|inputs?)\b[^.;]*?\b(?:may|can|shall|should|is|are)\b"
+    r"|\bonly (?:the )?(?:files?|data(?:sets?)?) (?:listed|named|provided) (?:above|here|below)? ?"
+    r"(?:may|can|shall) be (?:used|read|accessed|loaded)\b",
+    re.I,
+)
+
 SPLIT_SUB = re.compile(r";|\bbut\b|\bhowever\b|\bwhile\b|\bwhereas\b", re.I)
 
 
@@ -142,6 +156,11 @@ class Policy:
             if path_matches(path, r.target):
                 return r
         return None
+
+    def unlisted_files_rule(self) -> Rule | None:
+        """The rule saying the allowed files are the only ones that may be read (needs allow_file rules)."""
+        r = self.of("forbid_unlisted_files")
+        return r[0] if r and self.of("allow_file") else None
 
     def network_denied(self) -> Rule | None:
         d = self.of("deny_network")
@@ -357,6 +376,8 @@ def extract_policy(text: str) -> Policy:
                     add("forbid_external_data", "", c)
                 elif pol_sub > 0:
                     add("allow_external_data", "", c)
+        if ONLY_LISTED_RE.search(c.text):
+            add("forbid_unlisted_files", "", c)
         if REPRO_RE.search(c.text) and re.search(
                 r"\b(must|should|required?|fixed?|same|identical|deterministic)\b", c.text, re.I):
             add("require_reproducible", "", c)
@@ -366,6 +387,14 @@ def extract_policy(text: str) -> Policy:
             pol.unmapped.append(f"{c.clause_id}: {c.text}")
             pol.notes.append(f"Clause {c.clause_id} reads like a restriction but Clean Room could not turn it "
                              f"into a check: \u201c{c.text[:200]}\u201d. Check it by hand.")
+
+    # "All other files are off limits" only means something next to a list of allowed files
+    if not pol.of("allow_file"):
+        for r in pol.of("forbid_unlisted_files"):
+            pol.rules.remove(r)
+            pol.unmapped.append(f"{r.clause_id}: {r.quote}")
+            pol.notes.append(f"Clause {r.clause_id} limits reads to the allowed files, but the rules name no "
+                             "allowed file, so Clean Room cannot check it. Check it by hand.")
 
     # A file both allowed and forbidden: forbidden wins, note it.
     forb = {r.target.lower() for r in pol.of("forbid_file")}

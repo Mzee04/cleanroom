@@ -46,7 +46,8 @@ def chat(messages: list[dict], *, json_mode: bool = False, timeout: int = 60) ->
 RULES_PROMPT = """You turn machine-learning competition rules into a JSON policy.
 Return {"rules": [...]} where each item has:
   kind: one of forbid_file, allow_file, deny_network, allow_host, forbid_host,
-        forbid_external_data, allow_external_data, require_reproducible
+        forbid_external_data, allow_external_data, require_reproducible,
+        forbid_unlisted_files (the allowed files are the only ones that may be read)
   target: file name/glob or host name ("" when not applicable)
   clause_id: the clause number if present
   quote: the exact sentence from the rules, copied verbatim

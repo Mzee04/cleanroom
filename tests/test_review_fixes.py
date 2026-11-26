@@ -38,9 +38,56 @@ def test_policy_negations(text, want, not_want):
     assert want <= got and not (not_want & got), got
 
 
-def test_clause_with_only_allows_is_still_listed_as_unmapped_when_partly_understood():
+def test_all_other_files_off_limits_becomes_an_allowlist_rule():
     pol = extract_policy("1. Only train.csv and test.csv may be used. All other files are off limits.")
-    assert pol.unmapped          # "all other files" is not a rule the extractor can enforce; say so
+    assert not pol.unmapped
+    r = pol.unlisted_files_rule()
+    assert r is not None and r.clause_id.startswith("1") and "off limits" in r.quote
+
+
+@pytest.mark.parametrize("text", [
+    "1. Participants may use train.csv. No other data may be used.",
+    "1. You may read train.csv and test.csv; any other files must not be read.",
+    "1. train.csv is provided. Participants must not use any other files.",
+])
+def test_allowlist_wordings(text):
+    assert extract_policy(text).unlisted_files_rule() is not None
+
+
+def test_allowlist_sentence_before_the_list_still_counts():
+    pol = extract_policy("1. All other files are off limits. Only train.csv may be used.")
+    assert pol.unlisted_files_rule() is not None and not pol.unmapped
+
+
+def test_all_other_files_without_a_named_allowed_file_stays_unmapped():
+    pol = extract_policy("1. All other files are off limits.")
+    assert pol.unlisted_files_rule() is None and pol.unmapped
+
+
+def test_allowlist_rule_fails_unlisted_reads_but_not_own_made_or_aliased_files():
+    from cleanroom import checks
+    from cleanroom.trace import Event, Trace
+
+    def ev(**kw):
+        return Event(**{"source": "strace", "file": "strace.1", "lineno": 7, "line": "openat(...)", **kw})
+    pol = extract_policy("1. Only train.csv and test.csv may be used. All other files are off limits.")
+    t = Trace([ev(kind="open", path="data/train.csv", mode="read"),
+               ev(kind="open", path="data/extra.csv", mode="read"),
+               ev(kind="open", path="cache/feat.csv", mode="write"),
+               ev(kind="open", path="cache/feat.csv", mode="read"),
+               ev(kind="alias", op="link", path="data/train.csv", path2="t2.csv"),
+               ev(kind="open", path="t2.csv", mode="read"),
+               ev(kind="open", path="data/valid.csv", mode="read")])
+    fs = checks.check_files(t, pol, "/w", ["submission.csv"], own_files=["data/valid.csv"])
+    fail = [f for f in fs if f.code == "forbidden_file_read"]
+    assert [f.title for f in fail] == ["Read forbidden file data/extra.csv"]
+    assert fail[0].severity == "FAIL" and "off limits" in fail[0].quote
+    assert not any(f.code == "no_forbidden_files" for f in fs)
+    # without the allowlist sentence the same read is only a warning
+    pol2 = extract_policy("1. Only train.csv and test.csv may be used.")
+    fs2 = checks.check_files(t, pol2, "/w", ["submission.csv"], own_files=["data/valid.csv"])
+    assert [f.code for f in fs2 if f.severity == "FAIL"] == []
+    assert any(f.code == "unlisted_file_read" for f in fs2)
 
 
 # ---- L1/L2: case-insensitive matching, inferred rules do not hit absolute paths ---
