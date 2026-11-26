@@ -22,7 +22,7 @@ cleanroom = "cleanroom.cli:main"
 include = ["cleanroom*"]
 
 [tool.setuptools.package-data]
-cleanroom = ["_hook/*.py"]
+cleanroom = ["_hook/*.py", "_runner/*.py"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

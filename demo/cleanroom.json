@@ -3,9 +3,11 @@
   "output": "submission.csv",
   "id_column": "id",
   "pred_column": "pred",
-  "holdout": {"pred": "valid_pred.csv", "truth": "data/valid.csv", "truth_column": "target"},
+  "holdout": {"pred": "valid_pred.csv", "truth": "host/valid_labels.csv", "truth_column": "target"},
   "leaderboard_cmd": ["python3", "host/leaderboard.py", "{output}"],
   "own_files": ["data/valid.csv"],
+  "private": ["host/valid_labels.csv"],
+  "submission_ids": "data/test.csv",
   "seeds": [1, 2, 3],
   "timeout": 600,
   "worker_setup": [

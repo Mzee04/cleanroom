@@ -1,61 +1,65 @@
 Clean Room agent · backend=local
 
-[1/7] Rules → policy: 6 rules from rules.txt
+[1/7] Rules → policy: 7 rules from rules.txt
   • allow_file             train.csv                (rule 1.1)
   • allow_file             test.csv                 (rule 1.1)
   • forbid_file            test_labels.csv          (rule 1.2)
   • forbid_external_data                            (rule 1.3 (sentence 1))
   • deny_network                                    (rule 2.1)
   • require_reproducible                            (rule 3.1)
+  • forbid_file            host/valid_labels.csv    (rule cleanroom.json)
 
 [2/7] Preparing the worker (egress denied, tracer on)
-  network: denied: empty network namespace (unshare -rn)
-  tracing: {'strace_installed': True, 'strace_works': True, 'unshare_net': True, 'audit_hook': True, 'strace_in_netns': True}
+  session: cr-20261126-024506-98ec
+  network: denied: empty network namespace (unshare -n), probe refused
+  tracing: {'strace_installed': True, 'strace_works': True, 'unshare_net': True, 'audit_hook': True, 'separate_uid': True, 'strace_in_netns': True, 'egress_probe_refused': True, 'python': '3.13.5'}
 
 [3/7] Checkpointed the starting state: local-v0
 
 [4/7] Running candidates from the checkpoint
   A: exit 0, sha256 bab13241deae…, FAIL
-    leaderboard 0.9200 · holdout AUC 0.7721
+    tracer strace+audit · candidate uid separate · leaderboard 0.9200 · holdout AUC 0.7721
     FAIL Read forbidden file data/test_labels.csv
       rule 1.2: “The file test_labels.csv is provided for organiser scoring only and must not be read by participant code.”
-      ↳ strace.141889:1830  openat(AT_FDCWD, "data/test_labels.csv", O_RDONLY|O_CLOEXEC) = 4
-      ↳ audit.jsonl:1370  {"ev": "open", "pid": 141889, "path": "data/test_labels.csv", "mode": "r", "flags": 524288, "cwd": "/workspace/cleanroom/demo/.cleanroom/replay/A-1795651118648"}
+      ↳ strace.231291:1825  openat(AT_FDCWD</var/tmp/cleanroom-1000/A-1795661106645-4e32>, "data/test_labels.csv", O_RDONLY|O_CLOEXEC) = 4</var/tmp/cleanroom-1000/A-1795661106645-4e32/data/test_labels.csv>
+      ↳ audit.jsonl:1378  {"ev": "open", "pid": 231291, "path": "data/test_labels.csv", "mode": "r", "flags": 524288, "cwd": "/var/tmp/cleanroom-1000/A-1795661106645-4e32", "real": "/var/tmp/cleanroom-1000/A-
   B: exit 0, sha256 212e37d39ed6…, PASS
-    leaderboard 0.8356 · holdout AUC 0.7855
+    tracer strace+audit · candidate uid separate · leaderboard 0.8356 · holdout AUC 0.7855
   C: exit 0, sha256 5af4341aeb2c…, FAIL
-    leaderboard 0.8059 · holdout AUC 0.7664
+    tracer strace+audit · candidate uid separate · leaderboard 0.8059 · holdout AUC 0.7664
     FAIL Tried to reach raw.githubusercontent.com
       rule 2.1: “Submissions are evaluated offline: internet access is disabled during evaluation and code must not make network calls.”
-      ↳ audit.jsonl:1359  {"ev": "socket.getaddrinfo", "pid": 141954, "host": "raw.githubusercontent.com", "port": 443}
-      ↳ strace.141954:1851  connect(4, {sa_family=AF_INET, sin_port=htons(53), sin_addr=inet_addr("198.18.0.53")}, 16) = -1 ENETUNREACH (Network is unreachable)
+      ↳ audit.jsonl:1368  {"ev": "socket.getaddrinfo", "pid": 231386, "host": "raw.githubusercontent.com", "port": 443}
+      ↳ strace.231386:1848  connect(4<socket:[1359894]>, {sa_family=AF_INET, sin_port=htons(53), sin_addr=inet_addr("198.18.0.53")}, 16) = -1 ENETUNREACH (Network is unreachable)
   D: exit 0, sha256 937236dbd824…, PASS
-    leaderboard 0.8252 · holdout AUC 0.7721
-  E: exit 0, sha256 6a880edcbaa0…, PASS
-    leaderboard 0.7867 · holdout AUC 0.7654
+    tracer strace+audit · candidate uid separate · leaderboard 0.8252 · holdout AUC 0.7721
+  E: exit 0, sha256 5e999b9c7516…, PASS
+    tracer strace+audit · candidate uid separate · leaderboard 0.7941 · holdout AUC 0.7711
 
 [5/7] Investigating red flags
-  A: Without data/test_labels.csv the output changes and the leaderboard score moves from 0.9200 to 0.8252: the score depends on the forbidden file.
-  C: The run still produced its output with egress denied, so the model does not need the download to work. Remove the network call before submitting; as written it breaks the rules.
+  A: One-factor re-run: the unchanged re-run reproduced the output, and without data/test_labels.csv the output changes and the leaderboard score moves from 0.9200 to 0.8252: the score depends on the forbidden file.
+  C: One-factor check: the run produced its output while egress denial was verified, so the output did not need the download. Remove the network call before submitting; as written it breaks the rules.
 
 [6/7] Verifying reproduction from the checkpoint
   A: skipped (already ineligible)
-  B: MATCH · SHA-256 212e37d39ed6e5f4… matched on re-run. This proves reproduction in this environment only.
+  B: MATCH · SHA-256 212e37d39ed6e5f4… matched on re-run: reproduced in the recorded environment (same checkpoint, libraries and hardware). Other environments may differ.
   C: skipped (already ineligible)
-  D: MATCH · SHA-256 937236dbd8249680… matched on re-run. This proves reproduction in this environment only.
-  E: MISMATCH · Original SHA-256 6a880edcbaa05ea9…, re-run a45e98846bc4269e…. Fix random seeds and remove other non-determinism before submitting.
+  D: MATCH · SHA-256 937236dbd8249680… matched on re-run: reproduced in the recorded environment (same checkpoint, libraries and hardware). Other environments may differ.
+  E: MISMATCH · Original SHA-256 5e999b9c7516375d…, re-run 961b8e930059f71e…. Fix random seeds and remove other non-determinism before submitting.
 
 [7/7] Honest score: seed spread on your holdout
-  B: seeds [1, 2, 3] → AUC 0.7855, 0.7855, 0.7855 (sd 0.0000)
-  D: seeds [1, 2, 3] → AUC 0.7721, 0.7721, 0.7721 (sd 0.0000)
+  B: seeds [1, 2, 3] → AUC 0.7855, 0.7855, 0.7855 (sample sd 0.0000, outputs identical)
+  D: seeds [1, 2, 3] → AUC 0.7721, 0.7721, 0.7721 (sample sd 0.0000, outputs identical)
 
 Recommendation: B
-Submit B. No forbidden access detected in its trace, no network attempts, and its output reproduced from checkpoint local-v0 (SHA-256 match; this proves reproduction in this environment only). Its holdout ROC AUC is 0.7855 (95% CI 0.689–0.874).
+Submit B. No forbidden access detected in its trace, no network attempts, and its output reproduced from checkpoint local-v0 (SHA-256 match: reproduced in the recorded environment). Its holdout ROC AUC is 0.7855 (95% CI 0.689–0.874, optimistic because it is the top pick).
 A is not recommended despite a leaderboard score of 0.9200: Read forbidden file data/test_labels.csv.
 C is not recommended despite a leaderboard score of 0.8059: Tried to reach raw.githubusercontent.com.
-E is not recommended despite a leaderboard score of 0.7867: Output did not reproduce from checkpoint local-v0.
-B vs D on your holdout: +0.0134 AUC, but the 95% interval (-0.0166 to +0.0435) includes zero, so the edge is within noise and D would be an equally defensible pick.
+E is not recommended despite a leaderboard score of 0.7941: Output did not reproduce from checkpoint local-v0.
+B vs D on your holdout: +0.0134 AUC, but the 95% interval (-0.0156 to +0.0458) includes zero, so the edge is within noise and D would be an equally defensible pick.
   ⚠ A has the top leaderboard score but is not eligible: Read forbidden file data/test_labels.csv
+  ⚠ B's output was byte-identical for every seed, so either it is fully deterministic or it ignores CLEANROOM_SEED; the seed spread says nothing about seed sensitivity in that case.
+  ⚠ B was picked as the best holdout score, so its interval is optimistic (selection after the maximum); use the paired comparison below.
 
-Report: /workspace/cleanroom/demo/.cleanroom/report.html  ·  ledger: /workspace/cleanroom/demo/.cleanroom/ledger.sqlite  ·  GitHub ledger: 5 issue payloads in .cleanroom/outbox
-Done in 28.7s
+Report: /tmp/crdemo/.cleanroom/report.html  ·  ledger: /tmp/crdemo/.cleanroom/ledger.sqlite  ·  GitHub ledger: 5 issue payloads in .cleanroom/outbox
+Done in 48.2s

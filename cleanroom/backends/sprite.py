@@ -26,6 +26,7 @@ worker Sprite never receives it, and this module never prints or logs it.
 from __future__ import annotations
 
 import io
+import http.client
 import json
 import os
 import re
@@ -37,14 +38,27 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+import secrets
+
 from ..trace import STRACE_ARGS
-from .base import HOOK_DIR, Backend, RunResult, RunSpec, sha256_file, tail
+from .base import HOOK_DIR, RUNNER, Backend, RunResult, RunSpec, extract_bundle, sha256_file, tail
 from .local import EXCLUDE_DIRS
 
 DEFAULT_API = "https://api.sprites.dev"
-REMOTE_HOME = "/home/sprite"
-REMOTE_WORK = f"{REMOTE_HOME}/work"
-REMOTE_HOOK = f"{REMOTE_HOME}/.cleanroom-hook"
+# /home/sprite is 0750, so everything a separate candidate uid must reach lives under /srv/cr
+SRV = "/srv/cr"
+REMOTE_WORK = f"{SRV}/work"          # the project; owned by the candidate uid
+REMOTE_HOME = f"{SRV}/home"          # the candidate's HOME
+REMOTE_BIN = f"{SRV}/bin"            # runner.py + hook/ (root-owned, read-only for the candidate)
+REMOTE_HOOK = f"{REMOTE_BIN}/hook"
+REMOTE_SITE = f"{SRV}/site"          # read-only copy of the packages worker_setup installed
+REMOTE_RT = f"{SRV}/rt"              # runner trace dirs (root 0700 each) and audit FIFOs
+REMOTE_OUT = f"{SRV}/out"            # bundles + done markers, handed to the sprite user
+REMOTE_SPEC = f"{SRV}/spec"          # run specs (root only)
+REMOTE_PYBIN = f"{SRV}/pybin"
+CAND_PATH = f"{REMOTE_PYBIN}:/usr/local/bin:/usr/bin:/bin"
+CANDIDATE_USER = "cr-cand"
+POLL_BLOCK = 40                      # seconds one wait-exec may block (well under the proxy's drop time)
 
 
 class SpritesAPIError(RuntimeError):
@@ -218,11 +232,11 @@ class SpritesAPI:
         return self._ndjson("POST", f"/v1/sprites/{name}/checkpoints/{checkpoint_id}/restore")
 
 
-def _tar_project(project: Path) -> bytes:
+def _tar_project(project: Path, is_private=lambda rel: False) -> bytes:
     buf = io.BytesIO()
 
     def filt(ti):
-        if any(p in EXCLUDE_DIRS for p in Path(ti.name).parts):
+        if any(p in EXCLUDE_DIRS for p in Path(ti.name).parts) or is_private(ti.name):
             return None
         ti.uid = ti.gid = 0
         ti.uname = ti.gname = ""
@@ -230,23 +244,31 @@ def _tar_project(project: Path) -> bytes:
 
     with tarfile.open(fileobj=buf, mode="w:gz") as tf:
         for child in sorted(project.iterdir()):
-            if child.name not in EXCLUDE_DIRS:
+            if child.name not in EXCLUDE_DIRS and not is_private(child.name):
                 tf.add(child, arcname=child.name, filter=filt)
     return buf.getvalue()
 
 
-class SpriteBackend(Backend):
-    """Runs candidates on a worker Sprite.
+FINGERPRINT_PY = (
+    "import json,os,platform,sys\n"
+    "fp={'python':sys.version.split()[0],'machine':platform.machine(),'kernel':platform.release(),"
+    "'cpus':os.cpu_count()}\n"
+    "for m in ('numpy','sklearn','scipy','pandas'):\n"
+    "    try:\n"
+    "        fp[m]=__import__(m).__version__\n"
+    "    except Exception:\n"
+    "        pass\n"
+    "print('FP='+json.dumps(fp))\n")
 
-    STATUS: written against the documented API; the live test is recorded in
-    the README (section "Sprite deployment status").
-    """
+
+class SpriteBackend(Backend):
+    """Runs candidates on a worker Sprite, as an unprivileged uid under a root-owned strace."""
 
     name = "sprite"
 
     def __init__(self, project: Path, worker: str | None = None, api: SpritesAPI | None = None,
-                 setup: list[str] | None = None, **kw):
-        super().__init__(project)
+                 setup: list[str] | None = None, private: list[str] | None = None, **kw):
+        super().__init__(project, private=private)
         self.worker = worker or os.environ.get("CLEANROOM_WORKER", "cleanroom-worker")
         self.api = api or SpritesAPI()
         self.setup_cmds = setup or []
@@ -278,6 +300,13 @@ class SpriteBackend(Backend):
             time.sleep(3)
         raise SpritesAPIError(f"worker {self.worker} not ready after {limit}s: {last}")
 
+    def _put(self, data: bytes, dest: str, mode: str = "0644", owner: str = "root"):
+        """Write a file through the fs API (lands as the sprite user) and move it into place as root."""
+        tmp = f"/tmp/cr-up-{secrets.token_hex(6)}"
+        self.api.write_file(self.worker, tmp, data, mode="0600")
+        q = shlex.quote
+        self._sh(f"sudo install -D -m {mode} -o {owner} -g {owner} {q(tmp)} {q(dest)} && rm -f {q(tmp)}", timeout=120)
+
     def _apply_policy(self, policy: dict) -> dict:
         self.api.set_network_policy(self.worker, policy)
         got = self.api.get_network_policy(self.worker)
@@ -290,12 +319,18 @@ class SpriteBackend(Backend):
         self._policy_evidence = {"set": policy, "api_reports": got, "inside_probe": inside.strip()[-600:]}
         return self._policy_evidence
 
+    def _egress_verified(self) -> bool:
+        probe = self._policy_evidence.get("inside_probe", "")
+        return "DNS:refused" in probe and "HTTPS:blocked" in probe and "RAWIP:blocked" in probe
+
     # -- interface -------------------------------------------------------------
     def doctor(self) -> dict:
         if self._caps is None:
             out = self._sh(
                 "command -v strace >/dev/null && echo strace_installed=1 || echo strace_installed=0; "
-                "strace -f -qq -o /dev/null true 2>/dev/null && echo strace_works=1 || echo strace_works=0; "
+                f"sudo unshare --user --map-users=all --map-groups=all --keep-caps strace -f -qq -u {CANDIDATE_USER} "
+                "-o /dev/null true 2>/dev/null && echo strace_works=1 || echo strace_works=0; "
+                f"id -u {CANDIDATE_USER} >/dev/null 2>&1 && echo separate_uid=1 || echo separate_uid=0; "
                 "test -r /.sprite/policy/network.json && echo policy_file=1 || echo policy_file=0; "
                 "python3 -c 'import sys;print(\"python=\"+sys.version.split()[0])'; "
                 "command -v sprite-env >/dev/null && echo sprite_env=1 || echo sprite_env=0", timeout=120)
@@ -319,22 +354,47 @@ class SpriteBackend(Backend):
         setup = ["command -v strace >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq strace)"]
         setup += self.setup_cmds
         setup_log = self._sh(" ; ".join(f"({c}) 2>&1 | tail -3" for c in setup), timeout=1200)
-        # upload hook + project
-        self.api.write_file(self.worker, f"{REMOTE_HOOK}/sitecustomize.py",
-                            (HOOK_DIR / "sitecustomize.py").read_bytes())
-        self.api.write_file(self.worker, "/tmp/cr-project.tgz", _tar_project(self.project))
-        self._sh(f"rm -rf {REMOTE_WORK} && mkdir -p {REMOTE_WORK} && tar -xzf /tmp/cr-project.tgz -C {REMOTE_WORK}"
-                 " && rm -f /tmp/cr-project.tgz")
+        q = shlex.quote
+        # the candidate uid and the /srv/cr layout (all part of the baseline checkpoint)
+        self._sh(
+            f"set -e; id -u {CANDIDATE_USER} >/dev/null 2>&1 || sudo useradd --system --no-create-home "
+            f"--home-dir {REMOTE_HOME} --shell /usr/sbin/nologin {CANDIDATE_USER}; "
+            f"sudo mkdir -p {SRV} {REMOTE_BIN} {REMOTE_HOOK} {REMOTE_RT} {REMOTE_OUT} {REMOTE_SPEC} {REMOTE_HOME}; "
+            f"sudo chown root:root {SRV} {REMOTE_BIN} {REMOTE_HOOK} {REMOTE_RT} {REMOTE_OUT} {REMOTE_SPEC}; "
+            f"sudo chmod 755 {SRV} {REMOTE_BIN} {REMOTE_HOOK} {REMOTE_OUT}; sudo chmod 711 {REMOTE_RT}; "
+            f"sudo chmod 700 {REMOTE_SPEC}; "
+            # stale links in the scratch dirs would be in the baseline checkpoint and confuse the alias scan
+            "sudo find /tmp /var/tmp /dev/shm -xdev -mindepth 1 -maxdepth 3 -type l -delete 2>/dev/null || true; "
+            f"US=$(python3 -c 'import site;print(site.getusersitepackages())'); sudo rm -rf {REMOTE_SITE}; "
+            f"if [ -d \"$US\" ]; then sudo cp -a \"$US\" {REMOTE_SITE}; else sudo mkdir -p {REMOTE_SITE}; fi; "
+            f"sudo chown -R root:root {REMOTE_SITE}; sudo chmod -R a+rX,go-w {REMOTE_SITE}; "
+            # the interpreter the setup installed packages for (on a Sprite: a pyenv build behind a shim
+            # that is not on a plain PATH); candidates get it first on PATH as python3 / python
+            f"PY=$(python3 -c 'import os,sys;print(os.path.realpath(sys.executable))'); sudo rm -rf {REMOTE_PYBIN}; "
+            f"sudo mkdir -p {REMOTE_PYBIN}; sudo ln -s \"$PY\" {REMOTE_PYBIN}/python3; "
+            f"sudo ln -s \"$PY\" {REMOTE_PYBIN}/python; sudo -u {CANDIDATE_USER} {REMOTE_PYBIN}/python3 -c pass",
+            timeout=600)
+        self._put((HOOK_DIR / "sitecustomize.py").read_bytes(), f"{REMOTE_HOOK}/sitecustomize.py")
+        self._put(RUNNER.read_bytes(), f"{REMOTE_BIN}/runner.py")
+        self._put(_tar_project(self.project, self.is_private), "/tmp/cr-project.tgz", mode="0600")
+        self._sh(f"sudo rm -rf {REMOTE_WORK} && sudo mkdir -p {REMOTE_WORK} && "
+                 f"sudo tar -xzf /tmp/cr-project.tgz -C {REMOTE_WORK} --no-same-owner && sudo rm -f /tmp/cr-project.tgz && "
+                 f"sudo chown -R {CANDIDATE_USER}:{CANDIDATE_USER} {REMOTE_WORK} {REMOTE_HOME} && "
+                 f"sudo rm -rf {REMOTE_HOME}/.local && echo ok")
+        fp_out = self._sh(f"cd {REMOTE_WORK} && sudo -u {CANDIDATE_USER} env -i PATH={CAND_PATH} HOME={REMOTE_HOME} "
+                          f"PYTHONPATH={REMOTE_SITE} python3 -c {q(FINGERPRINT_PY)}", timeout=120)
+        m = re.search(r"FP=(\{.*\})", fp_out)
+        self.fingerprint = json.loads(m.group(1)) if m else {"error": tail(fp_out, 200)}
+        self.fingerprint["worker"] = self.worker
         ev = self._apply_policy(network_policy)
         self._caps = None
         return {"backend": self.name, "worker": self.worker, "created": created,
-                "capabilities": self.doctor(), "network_policy": ev,
-                "setup_log_tail": setup_log[-800:],
-                "network": self._network_desc()}
+                "capabilities": self.doctor(), "network_policy": ev, "fingerprint": self.fingerprint,
+                "setup_log_tail": setup_log[-800:], "network": self._network_desc()}
 
     def _network_desc(self) -> str:
         probe = self._policy_evidence.get("inside_probe", "")
-        if "DNS:refused" in probe and "HTTPS:blocked" in probe and "RAWIP:blocked" in probe:
+        if self._egress_verified():
             verdict = "denied (probed inside worker: DNS refused, HTTPS blocked, raw IP blocked)"
         elif "DNS:resolves" in probe or ":open" in probe:
             verdict = "WARNING: egress still open inside worker (" + " ".join(
@@ -346,61 +406,87 @@ class SpriteBackend(Backend):
     def checkpoint(self, label: str) -> str:
         return self.api.create_checkpoint(self.worker, f"cleanroom: {label}")
 
+    def _launch_and_wait(self, rspec: dict, timeout: int) -> str:
+        """Start the runner detached, then wait with short blocking polls (resumable).
+
+        The runner holds a Sprites Tasks API heartbeat while it works, so the
+        Sprite does not pause (and freeze or drop the detached process) between polls.
+        """
+        token = rspec["token"]
+        q = shlex.quote
+        spec_path = f"{REMOTE_SPEC}/{token}.json"
+        self._put(json.dumps(rspec).encode(), spec_path, mode="0600")
+        log = f"{REMOTE_OUT}/{token}.log"
+        started = self._sh(f"sudo setsid nohup python3 {REMOTE_BIN}/runner.py {q(spec_path)} > /dev/null 2>&1 "
+                           f"< /dev/null & echo cr-started", timeout=60)
+        if "cr-started" not in started:
+            raise SpritesAPIError("runner did not start: " + tail(started, 300))
+        done = rspec["done"]
+        deadline = time.time() + timeout + 300
+        errors = 0
+        while time.time() < deadline:
+            # each poll blocks on the worker for a while: the Sprite stays awake while the run is in progress,
+            # and no single HTTP exec is long enough for the proxy to drop it
+            try:
+                out = self._sh(f"timeout {POLL_BLOCK} bash -c 'until [ -f {done} ]; do sleep 1; done'; "
+                               f"cat {done} 2>/dev/null; pgrep -f {q('[r]unner.py ' + spec_path)} >/dev/null && echo cr-alive",
+                               timeout=POLL_BLOCK + 60)
+                errors = 0
+            except (SpritesAPIError, OSError, http.client.HTTPException) as e:   # dropped: resume polling
+                errors += 1
+                if errors > 10:
+                    raise SpritesAPIError(f"lost the worker while waiting for run {token}: {e}") from None
+                time.sleep(3)
+                continue
+            if token in out:
+                return log
+            if "cr-alive" not in out:
+                time.sleep(2)
+                out = self._sh(f"cat {done} 2>/dev/null", timeout=60)
+                if token in out:
+                    return log
+                raise SpritesAPIError(f"runner for {token} exited without finishing")
+        raise SpritesAPIError(f"run {token} did not finish in time")
+
     def run(self, spec: RunSpec, trace_dir: Path, hide: tuple[str, ...] = ()) -> RunResult:
         trace_dir = Path(trace_dir)
         trace_dir.mkdir(parents=True, exist_ok=True)
-        q = shlex.quote
+        token = secrets.token_hex(8)
         outs = [spec.output, *spec.extra_outputs]
-        cmd = " ".join(q(c) for c in spec.cmd)
-        envs = {"PYTHONHASHSEED": "0", "PYTHONDONTWRITEBYTECODE": "1",
-                "CLEANROOM_AUDIT_LOG": "/tmp/cr-trace/audit.jsonl", "PYTHONPATH": REMOTE_HOOK, **spec.env}
-        exports = " ".join(f"{k}={q(v)}" for k, v in envs.items())
-        strace = "strace " + " ".join(q(a) for a in STRACE_ARGS) + " -o /tmp/cr-trace/strace --"
-        script = f"""
-T=/tmp/cr-trace; rm -rf $T /tmp/cr-trace.tgz; mkdir -p $T/outputs
-cd {q(REMOTE_WORK)} || exit 97
-rm -f {' '.join(q(o) for o in outs)} {' '.join(q(h) for h in hide)}
-export {exports}
-if command -v strace >/dev/null && strace -f -qq -o /dev/null true 2>/dev/null; then
-  echo strace+audit > $T/tracer; PRE="{strace}"
-else
-  echo audit > $T/tracer; PRE=""
-fi
-s=$(date +%s%N)
-timeout {int(spec.timeout)} $PRE {cmd} > $T/stdout.txt 2> $T/stderr.txt; echo $? > $T/rc
-e=$(date +%s%N); echo $(( (e - s) / 1000000 )) > $T/ms
-for f in {' '.join(q(o) for o in outs)}; do [ -f "$f" ] && mkdir -p "$T/outputs/$(dirname "$f")" && cp "$f" "$T/outputs/$f"; done
-cat /.sprite/policy/network.json > $T/network_policy.json 2>/dev/null
-(getent hosts example.com >/dev/null 2>&1 && echo resolves || echo refused) > $T/dns_probe
-tar -czf /tmp/cr-trace.tgz -C /tmp cr-trace && echo cr-done
-"""
-        out = self._sh(script, timeout=spec.timeout + 120)
-        if "cr-done" not in out:
-            raise SpritesAPIError("remote run did not complete: " + tail(out, 400))
-        bundle = self.api.read_file(self.worker, "/tmp/cr-trace.tgz")
-        with tarfile.open(fileobj=io.BytesIO(bundle), mode="r:gz") as tf:
-            for m in tf.getmembers():
-                if not m.isfile():
-                    continue
-                rel = Path(m.name).relative_to("cr-trace")
-                dst = trace_dir / rel
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                dst.write_bytes(tf.extractfile(m).read())
-
-        def rd(n, d=""):
-            p = trace_dir / n
-            return p.read_text(errors="replace").strip() if p.exists() else d
-
-        outputs = {o: str(trace_dir / "outputs" / o) for o in outs if (trace_dir / "outputs" / o).exists()}
+        env = {"PATH": CAND_PATH, "LANG": "C.UTF-8", "PYTHONHASHSEED": "0",
+               "PYTHONDONTWRITEBYTECODE": "1", "PYTHONPATH": f"{REMOTE_HOOK}:{REMOTE_SITE}", **spec.env}
+        rspec = {"token": token, "work": REMOTE_WORK, "trace": f"{REMOTE_RT}/t-{token}",
+                 "audit_dir": f"{REMOTE_RT}/a-{token}", "bundle": f"{REMOTE_OUT}/{token}.tgz",
+                 "done": f"{REMOTE_OUT}/{token}.done", "cmd": list(spec.cmd), "env": env,
+                 "timeout": int(spec.timeout), "outputs": outs, "hide": list(hide),
+                 "user": CANDIDATE_USER, "home": REMOTE_HOME, "strace": True, "strace_args": STRACE_ARGS,
+                 "netns": "none", "ptrace_userns": True, "dns_probe": True, "bundle_owner": "sprite",
+                 "scan_dirs": [REMOTE_WORK, REMOTE_HOME, "/tmp", "/var/tmp", "/dev/shm"]}
+        self._launch_and_wait(rspec, int(spec.timeout))
+        bundle = self.api.read_file(self.worker, rspec["bundle"])
+        self._sh(f"sudo rm -f {REMOTE_OUT}/{token}.* {REMOTE_SPEC}/{token}.json", timeout=60)
+        notes = extract_bundle(bundle, trace_dir)
+        try:
+            meta = json.loads((trace_dir / "meta.json").read_text())
+        except (OSError, ValueError):
+            meta = {}
+        outputs = {o: str(trace_dir / "outputs" / o) for o in outs if (trace_dir / "outputs" / o).is_file()}
         sha = sha256_file(Path(outputs[spec.output])) if spec.output in outputs else None
-        dns = rd("dns_probe", "unknown")
-        res = RunResult(exit_code=int(rd("rc", "1") or 1), duration_s=int(rd("ms", "0") or 0) / 1000,
+
+        def rd(n):
+            p = trace_dir / n
+            return p.read_text(errors="replace") if p.exists() else ""
+        dns = meta.get("dns_probe", "unknown")
+        res = RunResult(exit_code=int(meta.get("rc", 1)), duration_s=int(meta.get("ms", 0)) / 1000,
                         workdir=REMOTE_WORK, trace_dir=str(trace_dir), output_sha256=sha, outputs=outputs,
-                        tracer=rd("tracer", "audit"),
+                        tracer=meta.get("tracer", "none"),
                         network=f"Sprite network policy (set from outside); DNS probe during run: {dns}",
-                        stdout_tail=tail(rd("stdout.txt")), stderr_tail=tail(rd("stderr.txt")))
-        if hide:
-            res.notes.append("hidden for this run: " + ", ".join(hide))
+                        stdout_tail=tail(rd("stdout.txt")), stderr_tail=tail(rd("stderr.txt")),
+                        notes=notes + meta.get("output_problems", []),
+                        egress_verified=self._egress_verified() and dns == "refused",
+                        candidate_uid=meta.get("candidate_uid", "same"))
+        if meta.get("hidden"):
+            res.notes.append("hidden for this run: " + ", ".join(meta["hidden"]))
         return res
 
     def run_from_checkpoint(self, checkpoint_id, spec, trace_dir, hide=()):

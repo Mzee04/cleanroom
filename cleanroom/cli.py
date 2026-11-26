@@ -4,7 +4,7 @@
   cleanroom run --name A -- python train.py
   cleanroom verify A                    restore checkpoint, re-run, compare SHA-256
   cleanroom investigate A               follow up A's red flags
-  cleanroom report [--serve]            HTML report (serves on :8080, the Sprite URL port)
+  cleanroom report [--serve]            HTML report (serves on 127.0.0.1:8080; --host 0.0.0.0 to publish)
   cleanroom agent [--serve]             the full loop over cleanroom.json candidates
   cleanroom doctor                      what isolation/tracing works on this machine
 """
@@ -25,9 +25,12 @@ def _project(args):
     from .config import load_config
     root = Path(args.project).resolve()
     cfg = load_config(root)
-    kw = {}
+    private = list(cfg.get("private", []))
+    if cfg.get("holdout") and cfg["holdout"].get("truth"):
+        private.append(cfg["holdout"]["truth"])   # the holdout truth never goes where candidates run
+    kw = {"private": private}
     if args.backend == "sprite":
-        kw = {"worker": args.worker, "setup": cfg.get("worker_setup")}
+        kw.update(worker=args.worker, setup=cfg.get("worker_setup"))
     return Project(root, get_backend(args.backend, root, **kw), use_llm=not args.no_llm)
 
 
@@ -152,7 +155,8 @@ def main(argv=None):
                         ("agent", cmd_agent, "run the full agent loop over cleanroom.json")):
         s = sub.add_parser(name, help=h)
         s.add_argument("--serve", action="store_true", help="serve the report over HTTP")
-        s.add_argument("--host", default="0.0.0.0")
+        s.add_argument("--host", default=os.environ.get("CLEANROOM_HOST", "127.0.0.1"),
+                       help="bind address (default 127.0.0.1; pass 0.0.0.0 to publish the report deliberately)")
         s.add_argument("--port", type=int, default=int(os.environ.get("PORT", 8080)))
         if name == "agent":
             s.add_argument("--no-honest", action="store_true", help="skip bootstrap CI + seed spread")

@@ -17,9 +17,9 @@ from . import checks, llm
 from .engine import Project
 from .ghledger import publish
 from .report import write_report
-from .summary import build_summary
+from .summary import build_summary, validate_verdict
 
-C = {"FAIL": "\033[31m", "WARN": "\033[33m", "PASS": "\033[32m", "INFO": "\033[36m", "B": "\033[1m", "0": "\033[0m"}
+C = {"FAIL": "\033[31m", "INCONCLUSIVE": "\033[35m", "WARN": "\033[33m", "PASS": "\033[32m", "INFO": "\033[36m", "B": "\033[1m", "0": "\033[0m"}
 
 
 def _c(tag, s, color=True):
@@ -47,8 +47,11 @@ def run_agent(proj: Project, honest: bool = True, publish_github: bool = False, 
                  "network": env.get("network"), "tracing": env.get("capabilities")}
     if env.get("network_policy"):
         env_short["network_policy"] = env["network_policy"]
-    proj.ledger.reset()
+    if env.get("fingerprint"):
+        env_short["fingerprint"] = env["fingerprint"]
+    sid = proj.ledger.start_session(f"agent loop on {proj.backend.name}")   # history is kept, never wiped
     proj.ledger.set_meta("environment", env_short)
+    log(f"  session: {sid}")
     log(f"  network: {env.get('network')}")
     log(f"  tracing: {env.get('capabilities')}")
 
@@ -62,9 +65,10 @@ def run_agent(proj: Project, honest: bool = True, publish_github: bool = False, 
         rec = proj.run(cand["name"], cand["cmd"], checkpoint=base, note=cand.get("note", ""))
         lb = rec["data"].get("leaderboard")
         ho = (rec["data"].get("holdout") or {}).get("auc")
-        log(f"    leaderboard {lb if lb is None else f'{lb:.4f}'} · holdout AUC {ho if ho is None else f'{ho:.4f}'}")
+        log(f"    tracer {rec['result'].tracer} · candidate uid {rec['result'].candidate_uid} · "
+            f"leaderboard {lb if lb is None else f'{lb:.4f}'} · holdout AUC {ho if ho is None else f'{ho:.4f}'}")
         for f in rec["findings"]:
-            if f.severity in ("FAIL", "WARN"):
+            if f.severity in ("FAIL", "WARN", "INCONCLUSIVE"):
                 log("    " + _c(f.severity, f.severity, color) + f" {f.title}")
                 if f.quote:
                     log(f"      rule {f.clause_id}: “{f.quote}”")
@@ -101,21 +105,26 @@ def run_agent(proj: Project, honest: bool = True, publish_github: bool = False, 
                 continue
             sp = proj.seeds(n)
             if sp:
+                sd = "n/a" if sp.get("sd") is None else f"{sp['sd']:.4f}"
                 log(f"  {n}: seeds {cfg['seeds']} → AUC {', '.join(f'{x:.4f}' for x in sp['scores'])} "
-                    f"(sd {sp['sd']:.4f})")
+                    f"(sample sd {sd}{', outputs identical' if sp.get('identical_outputs') else ''})")
     else:
         log(_c("B", "\n[7/7] Honest score skipped", color))
 
     summary = build_summary(proj.ledger, pol, env_short, honest=honest)
     if llm.configured():
         try:
-            v = llm.verdict({k: summary[k] for k in ("candidates", "recommendation", "comparison")})
-            proj.ledger.set_meta("verdict_llm", v)
-            summary["verdict"] = v
+            v = llm.verdict(summary)
+            if validate_verdict(v, summary):
+                proj.ledger.set_meta("verdict_llm", v)
+                summary["verdict"] = v
+            else:
+                log("  (LLM verdict disagreed with the evidence; using the deterministic verdict)")
         except Exception as e:
             log(f"  (LLM verdict skipped: {type(e).__name__}; using the deterministic verdict)")
-    dests = publish(summary, proj.root / ".cleanroom" / "outbox", really=publish_github)
+    dests = publish(summary, proj.root / ".cleanroom" / "outbox", really=publish_github, ledger=proj.ledger)
     posted = {d["name"]: d["url"] for d in dests if d.get("url")}
+    summary["ledger_chain"] = proj.ledger.get_meta("chain_head", None, glob=True)
     if posted:
         proj.ledger.set_meta("github_issues", posted)
         for c in summary["candidates"]:
@@ -129,7 +138,8 @@ def run_agent(proj: Project, honest: bool = True, publish_github: bool = False, 
     if publish_github:
         log(_c("B", "\nGitHub ledger (via the Sprites GitHub connector):", color))
         for d in dests:
-            log(f"  {d['name']}: " + (d.get("url") or d.get("error") or f"not posted ({d.get('path')})"))
+            log(f"  {d['name']}: " + (d.get("url") or d.get("error") or f"not posted ({d.get('path')})")
+                + (f" ({d['action']})" if d.get("action") else ""))
     log(f"\nReport: {out}  ·  ledger: {proj.ledger.path}  ·  GitHub ledger: "
         + (f"{len(posted)}/{len(dests)} issues posted" if publish_github
            else f"{len(dests)} issue payloads in .cleanroom/outbox"))

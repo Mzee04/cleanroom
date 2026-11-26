@@ -101,16 +101,27 @@ def test_restore_error_event_raises(monkeypatch):
 
 
 class FakeAPI:
-    """Records calls; serves a canned trace bundle for fs/read."""
-    via_gateway = False
     base = "https://api.sprites.dev"
 
-    def __init__(self, bundle):
-        self.calls, self.bundle = [], bundle
+    def __init__(self, bundle, finish=True):
+        self.calls, self.bundle, self.files, self.finish = [], bundle, {}, finish
+        self.token = None
 
-    def exec(self, name, argv, **kw):
-        self.calls.append(("exec", argv[-1][:40]))
-        return b"cr-ready cr-done"
+    def write_file(self, name, path, data, mode="0644"):
+        self.calls.append(("write", path))
+        try:
+            self.token = json.loads(data).get("token") or self.token
+        except ValueError:
+            pass
+
+    def exec_result(self, name, argv, timeout=None):
+        s = argv[-1]
+        self.calls.append(("exec", s[:60]))
+        if "until [ -f" in s:
+            return ((self.token if self.finish else "") + "\n", "", 0)
+        if "setsid nohup" in s:
+            return ("cr-started\n", "", 0)
+        return ("cr-ready\n", "", 0)
 
     def read_file(self, name, path):
         self.calls.append(("read", path))
@@ -123,18 +134,23 @@ class FakeAPI:
         return {"rules": [{"domain": "*", "action": "deny"}]}
 
 
-def _bundle():
+def _tar(files: dict, extra=None):
     buf = io.BytesIO()
-    files = {"cr-trace/rc": b"0\n", "cr-trace/ms": b"1234\n", "cr-trace/tracer": b"strace+audit\n",
-             "cr-trace/dns_probe": b"refused\n", "cr-trace/stdout.txt": b"hi\n", "cr-trace/stderr.txt": b"",
-             "cr-trace/outputs/submission.csv": b"id,pred\n1,0.5\n",
-             "cr-trace/audit.jsonl": b'{"ev":"open","pid":1,"path":"data/train.csv","mode":"r","cwd":"/home/sprite/work"}\n'}
     with tarfile.open(fileobj=buf, mode="w:gz") as tf:
         for n, d in files.items():
             ti = tarfile.TarInfo(n)
             ti.size = len(d)
             tf.addfile(ti, io.BytesIO(d))
+        for ti in extra or []:
+            tf.addfile(ti)
     return buf.getvalue()
+
+
+def _bundle():
+    meta = {"rc": 0, "ms": 1234, "tracer": "strace+audit", "dns_probe": "refused", "candidate_uid": "separate"}
+    return _tar({"cr-trace/meta.json": json.dumps(meta).encode(), "cr-trace/stdout.txt": b"hi\n",
+                 "cr-trace/stderr.txt": b"", "cr-trace/outputs/submission.csv": b"id,pred\n1,0.5\n",
+                 "cr-trace/audit.jsonl": b'{"ev":"open","pid":1,"path":"data/train.csv","mode":"r"}\n'})
 
 
 def test_run_from_checkpoint_restores_then_pulls_trace(tmp_path, monkeypatch):
@@ -144,8 +160,49 @@ def test_run_from_checkpoint_restores_then_pulls_trace(tmp_path, monkeypatch):
     from cleanroom.backends.base import RunSpec
     res = be.run_from_checkpoint("v3", RunSpec("B", ["python3", "b.py"]), tmp_path / "t")
     assert api.calls[0] == ("restore", "v3")
-    assert ("read", "/tmp/cr-trace.tgz") in api.calls
+    assert any(c[0] == "read" and c[1].startswith(sp.REMOTE_OUT) for c in api.calls)
+    launch = [c for c in api.calls if c[0] == "exec" and "setsid nohup" in c[1]]
+    assert launch, "runner must be launched detached, not as one long exec"
     assert res.exit_code == 0 and res.duration_s == 1.234 and res.tracer == "strace+audit"
-    assert res.checkpoint == "v3" and res.workdir == "/home/sprite/work"
+    assert res.checkpoint == "v3" and res.workdir == sp.REMOTE_WORK and res.candidate_uid == "separate"
     assert res.output_sha256 and "refused" in res.network
+    assert res.egress_verified is False          # no verified deny-policy probe in this fake
     assert (tmp_path / "t" / "audit.jsonl").exists()
+
+
+def test_runner_exit_without_done_marker_raises(tmp_path, monkeypatch):
+    monkeypatch.setattr(sp.time, "sleep", lambda s: None)
+    be = sp.SpriteBackend(tmp_path, worker="w", api=FakeAPI(_bundle(), finish=False))
+    from cleanroom.backends.base import RunSpec
+    with pytest.raises(sp.SpritesAPIError, match="exited without finishing"):
+        be.run(RunSpec("B", ["python3", "b.py"]), tmp_path / "t")
+
+
+def test_poll_liveness_check_cannot_match_itself():
+    import inspect
+    src = inspect.getsource(sp.SpriteBackend._launch_and_wait)
+    assert "[r]unner.py" in src
+
+
+def test_extract_bundle_refuses_traversal_links_and_oversize(tmp_path, monkeypatch):
+    from cleanroom.backends import base
+    monkeypatch.setattr(base, "MAX_MEMBER", 10)
+    sym = tarfile.TarInfo("cr-trace/link")
+    sym.type, sym.linkname = tarfile.SYMTYPE, "/etc/passwd"
+    hard = tarfile.TarInfo("cr-trace/hard")
+    hard.type, hard.linkname = tarfile.LNKTYPE, "cr-trace/ok"
+    data = _tar({"cr-trace/ok": b"fine", "cr-trace/../../evil": b"x", "/abs/evil": b"x",
+                 "other/evil": b"x", "cr-trace/big": b"x" * 50}, extra=[sym, hard])
+    out = tmp_path / "t"
+    probs = base.extract_bundle(data, out)
+    assert (out / "ok").read_text() == "fine"
+    assert not (out / "link").exists() and not (out / "hard").exists() and not (out / "big").exists()
+    assert not (tmp_path / "evil").exists() and not (tmp_path.parent / "evil").exists()
+    assert len(probs) == 6
+    assert json.loads((out / "bundle_problems.json").read_text()) == probs
+
+
+def test_corrupt_bundle_is_reported(tmp_path):
+    from cleanroom.backends import base
+    probs = base.extract_bundle(b"not a tarball", tmp_path / "t")
+    assert probs and "unreadable" in probs[0]

@@ -1,0 +1,29 @@
+name: tests
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install strace
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq strace
+      - name: Install
+        run: python -m pip install -e '.[dev]'
+      - name: Build the demo data
+        run: cd demo && python make_data.py
+      - name: Tests
+        run: python -m pytest -q

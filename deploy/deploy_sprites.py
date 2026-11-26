@@ -5,7 +5,10 @@
                     set from outside via the Sprites API. Holds nothing you need
                     to keep: every run restores a checkpoint, which wipes its disk.
   cleanroom-agent   runs the agent loop, the SQLite ledger and the report
-                    (public URL, port 8080). Drives the worker over the Sprites
+                    (public URL, port 8080: the report page is public by
+                    choice; the served JSON leaves out raw commands, home
+                    paths and stdout/stderr tails). The ledger state
+                    (demo/.cleanroom) is kept across redeploys. Drives the worker over the Sprites
                     API with a token kept in a private 0600 file on the agent
                     Sprite (written through the fs API, never on a command
                     line). The Sprites connector gateway refuses to wrap the
@@ -20,6 +23,14 @@ or SPRITES_TOKEN. Never printed.
   python3 deploy/deploy_sprites.py --no-run   # deploy only
   python3 deploy/deploy_sprites.py --publish --github-repo owner/repo
         # also post one issue per candidate through the Sprites GitHub connector
+        # (re-running the same session updates its issues instead of duplicating them)
+
+Long runs: a Sprite pauses ~30 s after the last activity and a paused Sprite
+freezes (warm) or drops (cold) background processes. The agent loop and every
+candidate run therefore hold a Sprites Tasks API heartbeat while they work.
+
+Token rotation: revoke the token at https://sprites.dev/account, create a new
+one and re-run this script; it rewrites the agent's token file.
 
 GitHub ledger: connect GitHub once in the Sprites dashboard (OAuth). This script
 finds that connector, makes sure its access policy only admits Sprites named
@@ -29,6 +40,7 @@ gateway URL (no token: the gateway attaches GitHub's credential itself).
 from __future__ import annotations
 
 import argparse
+import http.client
 import io
 import json
 import sys
@@ -89,7 +101,7 @@ def main():
     ap.add_argument("--agent", default="cleanroom-agent")
     ap.add_argument("--no-run", action="store_true")
     ap.add_argument("--publish", action="store_true", help="post the verdicts to the GitHub ledger")
-    ap.add_argument("--github-repo", default="", help="owner/repo of the ledger (private recommended)")
+    ap.add_argument("--github-repo", default="", help="owner/repo of the ledger (its issues are visible to anyone who can see the repo)")
     args = ap.parse_args()
     api = SpritesAPI()
 
@@ -124,8 +136,12 @@ def main():
 
     # 3. code + demo onto the agent
     api.write_file(args.agent, "/tmp/cleanroom.tgz", bundle())
+    keep = "/home/sprite/.cleanroom-keep"
     out = api.exec(args.agent, ["bash", "-c",
+                                f"rm -rf {keep} && if [ -d {REMOTE}/demo/.cleanroom ]; then "
+                                f"mv {REMOTE}/demo/.cleanroom {keep}; fi && "
                                 f"rm -rf {REMOTE} && mkdir -p {REMOTE} && tar -xzf /tmp/cleanroom.tgz -C {REMOTE} && "
+                                f"if [ -d {keep} ]; then mv {keep} {REMOTE}/demo/.cleanroom; fi && "
                                 f"cd {REMOTE} && (python3 -m pip install -q --break-system-packages -e . "
                                 f"|| python3 -m pip install -q -e .) 2>&1 | tail -2; echo deployed-ok"], timeout=600)
     log("agent install:", out.decode(errors="replace").strip()[-200:].replace("\x01", "").replace("\x02", ""))
@@ -148,15 +164,31 @@ def main():
         # under setsid on the agent Sprite and we poll its log file.
         env_args = " ".join(f"{k}={v!r}" for k, v in env.items())
         logf = f"{REMOTE}/agent-run.log"
-        start_cmd = (f"cd {REMOTE}/demo && rm -f {logf} && setsid nohup env {env_args} python3 -m cleanroom "
-                     f"--backend sprite agent{' --publish' if args.publish else ''} > {logf} 2>&1 < /dev/null & echo started")
-        log("starting the agent loop on the agent Sprite:", api.exec_result(args.agent, ["bash", "-c", start_cmd])[0].strip())
+        wrapper = (
+            "#!/bin/bash\n"
+            "api() { curl -s --max-time 10 --unix-socket /.sprite/api.sock -H Content-Type:application/json "
+            "\"$@\" >/dev/null 2>&1; }\n"
+            "( while true; do api -X PUT http://sprite/v1/tasks/cleanroom-agent-loop -d '{\"expire\":\"5m\"}'; "
+            "sleep 45; done ) &\n"
+            "HB=$!\n"
+            "trap 'kill $HB 2>/dev/null; api -X DELETE http://sprite/v1/tasks/cleanroom-agent-loop' EXIT\n"
+            f"cd {REMOTE}/demo && python3 -m cleanroom --backend sprite agent \"$@\"\n")
+        api.write_file(args.agent, f"{REMOTE}/run-agent.sh", wrapper.encode(), mode="0755")
+        # one simple command in the background, every fd redirected: a backgrounded `a && b` list
+        # would be a subshell holding the exec's stdout open, so the exec would never return
+        start_cmd = (f"rm -f {logf}; setsid nohup env {env_args} {REMOTE}/run-agent.sh"
+                     f"{' --publish' if args.publish else ''} > {logf} 2>&1 < /dev/null & echo started")
+        try:
+            log("starting the agent loop on the agent Sprite:",
+                api.exec_result(args.agent, ["bash", "-c", start_cmd], timeout=60)[0].strip())
+        except Exception as e:  # noqa: BLE001 - a dropped reply does not mean the loop did not start
+            log("start reply dropped (", type(e).__name__, "); following the log anyway")
         t0, seen = time.time(), 0
         while time.time() - t0 < 3600:
             time.sleep(20)
             try:
                 text = api.exec_result(args.agent, ["bash", "-c", f"cat {logf}"], timeout=60)[0]
-            except (SpritesAPIError, OSError) as e:
+            except (SpritesAPIError, OSError, http.client.HTTPException) as e:
                 log("poll error (will retry):", type(e).__name__)
                 continue
             lines = text.splitlines()

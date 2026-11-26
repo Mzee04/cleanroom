@@ -29,7 +29,7 @@ KINDS = (
 
 NEG = re.compile(
     r"\b(must not|may not|shall not|should not|cannot|can ?not|can't|do not|don't|"
-    r"does not|never|not (?:be )?(?:permitted|allowed|used|accessed|read)|"
+    r"never|not (?:be )?(?:permitted|allowed|used|accessed|read)|"
     r"prohibited|forbidden|disallowed|banned|disabled|no access|not available|"
     r"is not allowed|are not allowed|strictly for|only for (?:the )?organi[sz]er|"
     r"for organi[sz]er (?:use|scoring) only|organi[sz]ers? only|offline)\b",
@@ -61,6 +61,32 @@ EXTDATA_RE = re.compile(
     r"outside data|other data sources?|pre-?trained (?:models?|weights))\b",
     re.I,
 )
+# File rules need more than a negation somewhere in the sentence: the negation has to bear on
+# *access* ("must not be read", "do not use"), or the file has to be called restricted. This keeps
+# "test.csv does not contain labels" from forbidding test.csv.
+FILE_NEG = re.compile(
+    r"\b(?:(?:must|may|shall|should|can|do|does|is|are|will)\s*(?:not|n't)|cannot|never|nor|no one may)\s+"
+    r"(?:\w+\s+){0,3}?(?:use|used|using|read|reading|access|accessed|accessing|open|opened|opening|load|"
+    r"loaded|loading|download|downloaded|touch|touched|inspect|inspected|copy|copied|look at|consult)\b|"
+    r"\b(?:prohibited|forbidden|disallowed|banned|off[- ]limits|not (?:be )?(?:permitted|allowed)|"
+    r"restricted to|reserved for|withheld|kept (?:private|secret|hidden)|confidential|strictly for|"
+    r"(?:only )?for (?:the )?organi[sz]ers?(?:'|\u2019)?(?: \w+)? (?:use |scoring )?only|organi[sz]ers? only|"
+    r"only for (?:the )?organi[sz]ers?|no access)\b",
+    re.I,
+)
+FILE_POS = re.compile(
+    r"\b(may use|may be used|may read|may load|may access|can use|can be used|are free to|is free to|"
+    r"permitted|allowed|you may|participants may|is fine|are fine|encouraged|provided|supplied|"
+    r"available to participants)\b",
+    re.I,
+)
+# Sentences that withhold labels without naming a file still forbid label files.
+WITHHELD_LABELS_RE = re.compile(
+    r"\b(?:test |hidden |private |ground[- ]truth )?(labels?|answers?|targets?|ground[- ]truth)\b[^.;]*?"
+    r"\b(?:are|is)\s+(?:withheld|hidden|kept (?:private|secret|hidden)|not (?:provided|released|shared|available)|"
+    r"restricted to (?:the )?organi[sz]ers?|reserved for (?:the )?organi[sz]ers?)",
+    re.I,
+)
 REPRO_RE = re.compile(r"\b(seeds?|reproduc\w*|deterministic|re-?run)\b", re.I)
 CLAUSE_ID_RE = re.compile(r"^\s*(?:(?:rule|section|§)\s*)?(\d+(?:\.\d+)*)[.):]?\s+", re.I)
 SPLIT_SUB = re.compile(r";|\bbut\b|\bhowever\b|\bwhile\b|\bwhereas\b", re.I)
@@ -83,6 +109,7 @@ class Policy:
     rules: list[Rule] = field(default_factory=list)
     rules_sha256: str = ""
     notes: list[str] = field(default_factory=list)
+    unmapped: list[str] = field(default_factory=list)   # restrictive clauses that produced no check
 
     # ---- queries -------------------------------------------------------
     def of(self, kind: str) -> list[Rule]:
@@ -93,6 +120,13 @@ class Policy:
             if path_matches(path, r.target):
                 return r
         return None
+
+    def digest(self) -> str:
+        """SHA-256 of the policy itself (rules + targets), used to bind evidence to the policy it was checked against."""
+        import hashlib
+        body = json.dumps({"rules_sha256": self.rules_sha256, "rules": [asdict(r) for r in self.rules]},
+                          sort_keys=True)
+        return hashlib.sha256(body.encode()).hexdigest()
 
     def allowed_file_rule(self, path: str) -> Rule | None:
         for r in self.of("allow_file"):
@@ -141,12 +175,23 @@ class Policy:
     # ---- io --------------------------------------------------------------
     def to_dict(self) -> dict:
         return {"rules_sha256": self.rules_sha256, "rules": [asdict(r) for r in self.rules],
-                "notes": self.notes}
+                "notes": self.notes, "unmapped": self.unmapped}
+
+    def with_config_rules(self, rules: list[dict]) -> "Policy":
+        """Add rules that come from cleanroom.json rather than the rules text (e.g. holdout truth)."""
+        have = {r.key() for r in self.rules}
+        for d in rules:
+            r = Rule(d["kind"], d.get("target", ""), d.get("clause_id", "cleanroom.json"), d["quote"], "config")
+            if r.key() not in have:
+                have.add(r.key())
+                self.rules.append(r)
+        return self
 
     @classmethod
     def from_dict(cls, d: dict) -> "Policy":
         return cls(rules=[Rule(**r) for r in d.get("rules", [])],
-                   rules_sha256=d.get("rules_sha256", ""), notes=d.get("notes", []))
+                   rules_sha256=d.get("rules_sha256", ""), notes=d.get("notes", []),
+                   unmapped=d.get("unmapped", []))
 
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -222,6 +267,14 @@ def split_clauses(text: str) -> list[Clause]:
     return clauses
 
 
+def _file_polarity(fragment: str) -> int:
+    if FILE_NEG.search(fragment):
+        return -1
+    if FILE_POS.search(fragment):
+        return 1
+    return 0
+
+
 def _polarity(fragment: str) -> int:
     if NEG.search(fragment):
         return -1
@@ -237,25 +290,36 @@ def extract_policy(text: str) -> Policy:
     pol = Policy(rules_sha256=hashlib.sha256(text.encode()).hexdigest())
     seen: set[tuple] = set()
 
-    def add(kind, target, clause):
-        r = Rule(kind, target, clause.clause_id, clause.text)
+    hits = [0]
+
+    def add(kind, target, clause, source="heuristic"):
+        hits[0] += 1
+        r = Rule(kind, target, clause.clause_id, clause.text, source)
         if r.key() not in seen:
             seen.add(r.key())
             pol.rules.append(r)
 
     for c in split_clauses(text):
+        n_before = hits[0]
+        restrictive = False
         subs = [s for s in SPLIT_SUB.split(c.text) if s.strip()] or [c.text]
-        clause_pol = _polarity(c.text)
         for sub in subs:
-            pol_sub = _polarity(sub) or clause_pol
+            # each sub-clause carries its own polarity: "Do not use external data; train.csv is
+            # provided" must not leak the first half's negation into the second
+            pol_sub = _polarity(sub)
+            fpol = _file_polarity(sub)
+            restrictive = restrictive or fpol < 0 or pol_sub < 0
             files = [f for f in FILE_RE.findall(sub)]
             hosts = [h.lower() for h in HOST_RE.findall(sub)
                      if not FILE_RE.fullmatch(h)]
             for f in files:
-                if pol_sub < 0:
+                if fpol < 0:
                     add("forbid_file", f, c)
-                elif pol_sub > 0:
+                elif fpol > 0:
                     add("allow_file", f, c)
+            if not files and WITHHELD_LABELS_RE.search(sub):
+                for g in ("*label*.csv", "*label*.parquet", "*answer*.csv", "*solution*.csv"):
+                    add("forbid_file", g, c, source="inferred")
             for h in hosts:
                 if pol_sub < 0:
                     add("forbid_host", h, c)
@@ -274,6 +338,10 @@ def extract_policy(text: str) -> Policy:
         if REPRO_RE.search(c.text) and re.search(
                 r"\b(must|should|required?|fixed?|same|identical|deterministic)\b", c.text, re.I):
             add("require_reproducible", "", c)
+        if restrictive and hits[0] == n_before:
+            pol.unmapped.append(f"{c.clause_id}: {c.text}")
+            pol.notes.append(f"Clause {c.clause_id} reads like a restriction but Clean Room could not turn it "
+                             f"into a check: \u201c{c.text[:200]}\u201d. Check it by hand.")
 
     # A file both allowed and forbidden: forbidden wins, note it.
     forb = {r.target.lower() for r in pol.of("forbid_file")}
@@ -287,17 +355,52 @@ def extract_policy(text: str) -> Policy:
     return pol
 
 
+def _target_in_quote(target: str, quote: str) -> bool:
+    """The quote has to name the target: the file/host itself, or the literal part of a glob."""
+    q = quote.lower()
+    t = target.lower().strip()
+    if not t:
+        return True
+    if t in q:
+        return True
+    lits = [x for x in re.split(r"[*?\[\]]+", t) if len(x.strip("./_-")) >= 3]
+    return bool(lits) and all(x in q for x in lits)
+
+
+NEEDS_TARGET = {"forbid_file", "allow_file", "allow_host", "forbid_host"}
+
+
 def merge_llm_rules(pol: Policy, text: str, llm_rules: list[dict]) -> Policy:
-    """Merge LLM-proposed rules, keeping only those whose quote is in the text."""
+    """Merge LLM-proposed rules. A rule is kept only when
+
+    * its quote appears verbatim in the rules text,
+    * the quote names its target (file or host), and
+    * the quote's own wording does not contradict the kind (a "forbid" rule from a
+      sentence that only grants permission, or the reverse).
+    """
     norm = lambda s: re.sub(r"\s+", " ", s).strip().lower()  # noqa: E731
     haystack = norm(text)
     have = {r.key() for r in pol.rules}
-    for d in llm_rules:
-        kind, quote = d.get("kind"), d.get("quote", "")
-        if kind not in KINDS or not quote or norm(quote) not in haystack:
-            pol.notes.append(f"Dropped LLM rule without a verbatim quote: {kind} {d.get('target','')}")
+    for d in llm_rules if isinstance(llm_rules, list) else []:
+        if not isinstance(d, dict):
             continue
-        r = Rule(kind, d.get("target", "") or "", d.get("clause_id", "llm"), quote, "llm")
+        kind, quote = d.get("kind"), str(d.get("quote", "") or "")
+        target = str(d.get("target", "") or "")
+        why = None
+        if kind not in KINDS or not quote or norm(quote) not in haystack:
+            why = "without a verbatim quote"
+        elif kind in NEEDS_TARGET and not target:
+            why = "without a target"
+        elif not _target_in_quote(target, quote):
+            why = "whose quote does not name its target"
+        else:
+            p = _file_polarity(quote) if kind.endswith("_file") else _polarity(quote)
+            if (kind.startswith(("forbid", "deny")) and p > 0) or (kind.startswith("allow") and p < 0):
+                why = "whose quote says the opposite"
+        if why:
+            pol.notes.append(f"Dropped LLM rule {why}: {kind} {target}".rstrip())
+            continue
+        r = Rule(kind, target, str(d.get("clause_id", "llm") or "llm"), quote, "llm")
         if r.key() not in have:
             have.add(r.key())
             pol.rules.append(r)

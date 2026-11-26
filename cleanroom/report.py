@@ -6,6 +6,8 @@ import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from .redact import redact_text
+
 E = html.escape
 
 CSS = """
@@ -29,7 +31,7 @@ th{color:var(--mute);font-weight:600;font-size:12px;text-transform:uppercase;let
 tr:last-child td{border-bottom:0}td.num{font-variant-numeric:tabular-nums;white-space:nowrap}
 .pill{display:inline-block;padding:2px 9px;border-radius:999px;font-size:12px;font-weight:700;letter-spacing:.03em}
 .FAIL{background:rgba(255,93,93,.14);color:var(--fail)}.WARN{background:rgba(245,185,65,.14);color:var(--warn)}
-.PASS{background:rgba(62,207,142,.14);color:var(--pass)}.INFO{background:rgba(106,169,255,.14);color:var(--info)}
+.PASS{background:rgba(62,207,142,.14);color:var(--pass)}.INCONCLUSIVE{background:rgba(196,120,255,.16);color:#c478ff}.INFO{background:rgba(106,169,255,.14);color:var(--info)}
 .rec{outline:2px solid var(--pass);outline-offset:-2px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px 20px;margin:14px 0}
 .card .head{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:6px}
@@ -47,17 +49,32 @@ font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:#d3d8
 """
 
 LIMITS = [
-    "“No forbidden access detected” means none appeared in the traced system calls and Python audit events. "
-    "Tracing is evidence, not proof: it cannot see every kind of leakage (for example labels copied into code "
-    "by hand, or leakage already inside the training data).",
-    "A SHA-256 match proves the output reproduced in this environment, from this checkpoint, only. Other "
-    "hardware, library versions or thread counts can change results.",
-    "Egress is denied for every run. Locally that is an empty network namespace; on a Sprite it is the "
-    "DNS-based network policy set from outside the worker.",
-    "The holdout score and its interval come from your own local split. They say nothing certain about the "
-    "private leaderboard; they show whether a gain is larger than the noise in your data.",
+    "What Clean Room is: an auditor for your own candidates, built to catch accidents and ordinary shortcuts "
+    "before you submit. It is hardened against simple evasion (symlinks, renames, hard links, editing the trace, "
+    "children started with a stripped environment), but it is not a sandbox proven against a determined "
+    "adversary with kernel exploits or side channels.",
+    "\u201cNo forbidden access detected\u201d means none appeared in the traced system calls and Python audit "
+    "events. Tracing is evidence, not proof: it cannot see leakage already inside the training data, labels "
+    "copied into code by hand, or reads through interfaces strace does not report (io_uring is flagged).",
+    "On the Sprite worker the candidate runs as its own unprivileged uid under a root-owned strace, so it "
+    "cannot edit or stop its trace. Locally it runs as you (development mode) and every run is capped at WARN.",
+    "Runs traced by the in-process audit hook only (no strace) are capped at WARN. A missing, empty, cut-short "
+    "or tampered trace is INCONCLUSIVE and never PASS.",
+    "A SHA-256 match proves the output reproduced in the recorded environment (checkpoint, library versions, "
+    "hardware), only. Other hardware, library versions or thread counts can change results.",
+    "Egress is denied for every run; a finding says egress was blocked only when that was verified by a probe "
+    "during the run. Locally that is an empty network namespace; on a Sprite it is the DNS-based network policy "
+    "set from outside the worker.",
+    "The holdout score and its interval come from your own local split, scored by the agent; the truth file "
+    "never reaches the worker. The top pick's interval is optimistic because it was chosen as the maximum; the "
+    "paired comparison is the fairer test. Seed spread only means something if the code reads CLEANROOM_SEED.",
+    "Investigations are one-factor re-runs: the run is repeated unchanged first, and a change is attributed to "
+    "the hidden file only if the unchanged re-run reproduced the original output.",
+    "The GitHub ledger is a hash chain of records (tamper-evident): an edited record no longer matches its hash "
+    "or the next record's link. It is not signed or externally timestamped.",
     "Rules-to-policy extraction is heuristic (plus an optional LLM pass whose quotes must match the rules "
-    "verbatim). Always read the policy table and the original rules.",
+    "verbatim and name their target). Restrictive clauses it could not map are listed. Always read the policy "
+    "table and the original rules.",
 ]
 
 
@@ -101,13 +118,18 @@ def render_html(s: dict) -> str:
     cards = []
     for c in s["candidates"]:
         fs = []
-        for f in sorted(c["findings"], key=lambda f: ["FAIL", "WARN", "PASS", "INFO"].index(f["severity"])):
+        for f in sorted(c["findings"], key=lambda f: ["FAIL", "INCONCLUSIVE", "WARN", "PASS", "INFO"].index(f["severity"])):
             q = (f'<blockquote><small>Rule {E(f["clause_id"])}</small>{E(f["quote"])}</blockquote>'
                  if f["quote"] else "")
             ev = f'<pre>{E(chr(10).join(f["evidence"]))}</pre>' if f["evidence"] else ""
             fs.append(f'<div class="f"><span class="pill {f["severity"]}">{f["severity"]}</span> '
                       f'<span class="t">{E(f["title"])}</span><div class="d">{E(f["detail"])}</div>{q}{ev}</div>')
         extra = ""
+        if c.get("investigated") or c.get("remaining_flags"):
+            extra += ('<div class="f"><span class="pill INFO">AGENT</span> <span class="t">Follow-up scope</span>'
+                      f'<div class="d">Investigated: {E("; ".join(c.get("investigated") or []) or "none")}.<br>'
+                      f'Not investigated (reported as found): {E("; ".join(c.get("remaining_flags") or []) or "none")}.'
+                      '</div></div>')
         if c["network_investigation"]:
             extra += f'<div class="f"><span class="pill INFO">AGENT</span> <span class="t">Network follow-up</span>' \
                      f'<div class="d">{E(c["network_investigation"])}</div></div>'
@@ -117,7 +139,8 @@ def render_html(s: dict) -> str:
             + ('<span class="pill PASS">RECOMMENDED</span>' if c["name"] == pick else "") +
             f'</div><div class="meta">Command <code>{E(" ".join(c["cmd"]))}</code> · checkpoint '
             f'<code>{E(c["checkpoint"] or "")}</code> · output SHA-256 <code>{E((c["sha256"] or "none")[:16])}…</code>'
-            f' · tracer <code>{E(c["tracer"] or "")}</code> · {c["n_events"] or 0} events'
+            f' · tracer <code>{E(c["tracer"] or "")}</code> · candidate uid {E(str(c.get("candidate_uid")))}'
+            f' · egress denial verified: {E(str(c.get("egress_verified")))} · {c["n_events"] or 0} events'
             + (f' · <a href="{E(c["ledger_issue"])}">GitHub ledger issue #{E(c["ledger_issue"].rsplit("/", 1)[-1])}</a>'
                if c.get("ledger_issue") else "") + '</div>'
             f'{extra}{"".join(fs)}</div>')
@@ -136,22 +159,34 @@ def render_html(s: dict) -> str:
                     f'ΔAUC {cmp_["diff"]:+.4f} (95% CI {cmp_["lo"]:+.4f} to {cmp_["hi"]:+.4f}) — '
                     f'{"conclusive" if cmp_["conclusive"] else "inconclusive: within noise"}</div>')
     title = f"Submit <b>{E(pick)}</b>" if pick else "Nothing ready to submit"
+    pc = next((c for c in s["candidates"] if c["name"] == pick), None)
+    if pc:
+        tr = pc.get("tracer") or ""
+        title += (f' <span class="pill {"PASS" if "strace" in tr else "WARN"}" style="font-size:13px;'
+                  f'vertical-align:middle">traced by {E(tr or "unknown")}'
+                  f'{", separate uid" if pc.get("candidate_uid") == "separate" else ", same uid (dev mode)"}</span>')
+    chain = s.get("ledger_chain") or {}
+    chain_html = (f'<div class="kv"><b>GitHub ledger chain head</b><code>{E(chain.get("record_sha256", ""))}</code>'
+                  f' · record #{E(str(chain.get("seq", "")))}</div>' if chain else "")
+    unmapped = s["policy"].get("unmapped") or []
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Clean Room report</title>
 <style>{CSS}</style></head><body><div class="wrap">
 <header><div><h1>Clean Room <span>integrity report</span></h1>
-<div class="sub">Personal submission integrity agent · generated {E(s["generated"])}</div></div>
+<div class="sub">Personal submission integrity agent · session {E(str(s.get("session", "")))} · generated {E(s["generated"])}</div></div>
 <div class="sub">{len(s["candidates"])} candidates · backend {E(str(env.get("backend", "local")))}</div></header>
 <section class="hero"><div class="pick">Agent verdict</div><div class="big">{title}</div>
 <p>{E(s["verdict"].removeprefix(f"Submit {pick}. ") if pick else s["verdict"]).replace(chr(10), "<br>")}</p>{cautions}</section>
 <h2>Candidates</h2>
 <table><thead><tr><th>Candidate</th><th>Leaderboard</th><th>Holdout ROC AUC</th><th>Forbidden files</th>
 <th>Network</th><th>Reproduction</th><th>Status</th></tr></thead><tbody>{"".join(rows)}</tbody></table>
-<div class="grid" style="margin-top:12px">{cmp_html}</div>
+<div class="grid" style="margin-top:12px">{cmp_html}{chain_html}</div>
 <h2>Evidence</h2>{"".join(cards)}
 <h2>Policy extracted from the rules</h2>
 <table><thead><tr><th>Kind</th><th>Target</th><th>Clause</th><th>Quote</th><th>Source</th></tr></thead>
 <tbody>{pol_rows}</tbody></table>
+<p class="meta">Policy digest <code>{E(s.get("policy_sha256", ""))}</code> · {len(s["policy"]["rules"])} rules ·
+{len(unmapped)} restrictive clause(s) not mapped to a check</p>
 {"".join(f'<p class="meta">{E(n)}</p>' for n in s["policy"].get("notes", []))}
 <h2>Environment</h2><div class="grid">{env_kv}</div>
 <h2>Honest limits</h2><ul class="limits">{"".join(f"<li>{E(x)}</li>" for x in LIMITS)}</ul>
@@ -159,15 +194,28 @@ def render_html(s: dict) -> str:
 </div></body></html>"""
 
 
+def public_view(obj):
+    """What report.json may show: home paths and token-shaped strings masked, no raw commands or trace dirs."""
+    drop = {"trace_dir", "workdir", "stdout_tail", "stderr_tail"}
+    if isinstance(obj, dict):
+        return {k: public_view(v) for k, v in obj.items() if k not in drop}
+    if isinstance(obj, (list, tuple)):
+        return [public_view(v) for v in obj]
+    if isinstance(obj, str):
+        return redact_text(obj)
+    return obj
+
+
 def write_report(summary: dict, out_dir: Path) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "report.json").write_text(json.dumps(summary, indent=2, default=str))
+    pub = public_view(summary)
+    (out_dir / "report.json").write_text(json.dumps(pub, indent=2, default=str))
     p = out_dir / "report.html"
-    p.write_text(render_html(summary))
+    p.write_text(render_html(pub))
     return p
 
 
-def serve(make_summary, host="0.0.0.0", port=8080):
+def serve(make_summary, host="127.0.0.1", port=8080):
     """Serve the live report; each request re-reads the ledger."""
 
     class H(BaseHTTPRequestHandler):
@@ -176,7 +224,7 @@ def serve(make_summary, host="0.0.0.0", port=8080):
             if path == "/healthz":
                 return self._send(200, b"ok", "text/plain")
             try:
-                s = make_summary()
+                s = public_view(make_summary())
             except Exception as e:  # keep the server up while the agent is mid-run
                 return self._send(503, f"report not ready: {type(e).__name__}".encode(), "text/plain")
             if path in ("/", "/index.html", "/report.html"):

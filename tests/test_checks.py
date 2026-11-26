@@ -57,7 +57,7 @@ def test_network_attempt_fails_under_offline_rule():
     assert len(fs) == 1
     f = fs[0]
     assert f.severity == "FAIL" and "raw.githubusercontent.com" in f.title and f.clause_id == "2.1"
-    assert "enforced" in f.detail and len(f.evidence) == 2   # host evidence + the blocked DNS syscall
+    assert "verified" in f.detail and len(f.evidence) == 2   # host evidence + the blocked DNS syscall
 
 
 def test_successful_raw_connect_is_reported_as_not_blocked():
@@ -80,7 +80,7 @@ def test_run_failures():
 def test_reproduction_wording():
     pol = extract_policy(RULES)
     ok = checks.check_reproduction("a" * 64, "a" * 64, "v3", pol)
-    assert ok.severity == "PASS" and "this environment only" in ok.detail
+    assert ok.severity == "PASS" and "recorded environment" in ok.detail
     bad = checks.check_reproduction("a" * 64, "b" * 64, "v3", pol)
     assert bad.severity == "FAIL" and bad.clause_id == "3.1"
 

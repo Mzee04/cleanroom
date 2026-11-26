@@ -8,3 +8,4 @@ demo/submissions/
 demo/*.csv
 .env
 .venv/
+demo/host/valid_labels.csv

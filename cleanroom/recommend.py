@@ -13,18 +13,20 @@ class Candidate:
     holdout: float | None = None
     leaderboard: float | None = None
     seed_sd: float | None = None
+    inconclusive: list[str] = field(default_factory=list)
 
 
 def recommend(cands: list[Candidate], seed_sd_limit: float = 0.02) -> dict:
-    """Eligible = no FAIL findings and reproduced from checkpoint.
+    """Eligible = no FAIL, no INCONCLUSIVE findings, and reproduced from checkpoint.
 
     Among eligible candidates prefer the best local holdout score (never the
     public leaderboard score, which can be inflated by leakage or overfitting),
-    then lower seed spread, then fewer warnings, then name.
+    then lower seed spread (an unmeasured spread ranks last, not first), then
+    fewer warnings, then name.
     """
     eligible, rejected = [], {}
     for c in cands:
-        why = list(c.failed)
+        why = list(c.failed) + [f"inconclusive: {x}" for x in c.inconclusive]
         if c.reproduced is False and not any("reproduce" in w for w in why):
             why.append("output did not reproduce from checkpoint")
         if c.reproduced is None and not why:
@@ -36,7 +38,7 @@ def recommend(cands: list[Candidate], seed_sd_limit: float = 0.02) -> dict:
 
     def key(c: Candidate):
         return (-(c.holdout if c.holdout is not None else float("-inf")),
-                c.seed_sd if c.seed_sd is not None else 0.0, len(c.warned), c.name)
+                c.seed_sd if c.seed_sd is not None else float("inf"), len(c.warned), c.name)
 
     eligible.sort(key=key)
     caution = []

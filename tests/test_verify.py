@@ -54,7 +54,7 @@ def test_checkpoint_snapshot_is_deterministic(tmp_path):
     proj = make_project(tmp_path)
     a = proj.backend.checkpoint("a")
     b = proj.backend.checkpoint("b")
-    ck = tmp_path / ".cleanroom" / "checkpoints"
+    ck = proj.backend.ckdir
     assert sha256_file(ck / f"{a}.tar.gz") == sha256_file(ck / f"{b}.tar.gz")
 
 

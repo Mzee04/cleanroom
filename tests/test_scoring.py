@@ -1,4 +1,4 @@
-import math
+import math  # noqa: F401
 
 from cleanroom.scoring import bootstrap_ci, paired_bootstrap_diff, roc_auc, seed_spread
 
@@ -7,7 +7,7 @@ def test_auc_basics_and_ties():
     assert roc_auc([0, 0, 1, 1], [0.1, 0.2, 0.8, 0.9]) == 1.0
     assert roc_auc([0, 0, 1, 1], [0.9, 0.8, 0.2, 0.1]) == 0.0
     assert roc_auc([0, 1], [0.5, 0.5]) == 0.5
-    assert math.isnan(roc_auc([1, 1], [0.1, 0.2]))
+    assert roc_auc([1, 1], [0.1, 0.2]) is None and roc_auc([], []) is None
 
 
 def test_auc_matches_sklearn():
@@ -31,12 +31,16 @@ def test_paired_diff_detects_real_gain_and_noise():
     y = [i % 2 for i in range(200)]
     good = [t + (i % 5) / 10 for i, t in enumerate(y)]
     weak = [0.2 * t + (i % 5) / 10 for i, t in enumerate(y)]
-    d = paired_bootstrap_diff(y, good, weak, n_boot=300)
+    ids = [str(i) for i in range(200)]
+    d = paired_bootstrap_diff(ids, y, good, ids, y, weak, n_boot=300)
     assert d["diff"] > 0 and d["conclusive"]
-    same = paired_bootstrap_diff(y, good, good, n_boot=100)
+    same = paired_bootstrap_diff(ids, y, good, ids, y, good, n_boot=100)
     assert same["diff"] == 0 and not same["conclusive"]
 
 
 def test_seed_spread():
     s = seed_spread([0.7, 0.7, 0.7])
     assert s["sd"] == 0 and s["range"] == 0
+    s = seed_spread([0.70, 0.72, 0.74])
+    assert abs(s["sd"] - 0.02) < 1e-12          # sample sd, not population sd
+    assert seed_spread([0.7])["sd"] is None and seed_spread([]) is None
